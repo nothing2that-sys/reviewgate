@@ -10,13 +10,15 @@ using ReviewGate.Providers;
 
 namespace ReviewGate.Core.Execution;
 
-public sealed class ReviewEngine(StateStore store)
+// live is the network transport for live plans; synthetic plans always use their pinned fixture and never touch it.
+public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
 {
     public string? CurrentRunId {get;private set;}
     public string? CurrentPlanId {get;private set;}
     public async Task<CommandResult> ExecuteAsync(Plan p,Grant? grant,string? resumeRun=null,bool recoverOnly=false,
         ResolutionFixture? resolution=null,CancellationToken cancellation=default)
     {
+        Data.Require(p.ExecutionMode==store.Namespace,"execution_mode_mismatch",13);
         // Recovery and unknown resolution only touch the ledger and saved responses, so they must stay possible
         // after the user edits original files; unchanged inputs are required only before a new dispatch.
         if(recoverOnly)Data.Require(p.Hash==Data.Hash(Data.Json(p with{Hash=""})),"plan_hash_mismatch",13);
@@ -54,6 +56,14 @@ public sealed class ReviewEngine(StateStore store)
                 // A request whose retries are used up stays incomplete without blocking the remaining requests.
                 if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));retryExhausted=true;continue;}
                 StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
+                var reviewer=p.Reviewers.Single(r=>r.Id==request.ReviewerId);
+                if(p.ExecutionMode=="live")
+                {
+                    // A missing key is found before any reservation or dispatch, so it never leaves an unknown attempt.
+                    Data.Require(live is not null&&live.HasCredential(reviewer.HostingProvider),"credential_missing",11);
+                    // A hand-written grant file is not an approval: live grants must come from the interactive grant command.
+                    Data.Require(store.IsGrantIssued(grant),"grant_not_issued",10);
+                }
                 // Bound in its own transaction before the first reservation, so a failed reservation cannot free it for another run.
                 if(!grantBound){store.BindGrant(run,p,grant);grantBound=true;}
                 var a=store.Reserve(run,p,request,grant);
@@ -61,19 +71,9 @@ public sealed class ReviewEngine(StateStore store)
                 StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
                 Data.Require(store.Now>=p.Prices.EffectiveFrom&&store.Now<p.Prices.EffectiveTo,"price_snapshot_expired",12);
                 store.Dispatch(a.Id);Checkpoint("dispatch_intent");
-                var fixture=Planner.SelectFixture(p,request);
-                try
-                {
-                    for(int waited=0;waited<fixture.DelayMs;waited+=25){CheckCancel(run,cancellation);await Task.Delay(Math.Min(25,fixture.DelayMs-waited),cancellation);}
-                    CheckCancel(run,cancellation);
-                }
-                catch(OperationCanceledException){store.Unknown(a.Id,"cancelled_in_flight");throw;}
-                if(fixture.Status is "unknown" or "timeout" or "network_error" or "not_sent")
-                {store.Unknown(a.Id,fixture.Status=="not_sent"?"synthetic_not_sent_confirmed":"dispatch_outcome_unknown");throw new ReviewError(13,"reconciliation_required");}
-                var reviewer=p.Reviewers.Single(r=>r.Id==request.ReviewerId);
-                string wire=WireAdapters.WrapFixture(reviewer,fixture);
-                if(fixture.HttpStatus>=400)wire=WireAdapters.RedactErrorBody(wire);
-                store.SaveResponse(a,new(a.Id,request.Id,p.Hash,wire,fixture.HttpStatus));
+                var (wire,http)=p.ExecutionMode=="live"?await SendLive(run,a,reviewer,request,cancellation):await SendFixture(p,run,a,reviewer,request,cancellation);
+                if(http>=400)wire=WireAdapters.RedactErrorBody(wire);
+                store.SaveResponse(a,new(a.Id,request.Id,p.Hash,wire,http));
                 Checkpoint("response_saved");
                 ProcessSaved(p,run,store.Attempts(run.Id).Single(x=>x.Id==a.Id));
                 Checkpoint("settled");
@@ -101,6 +101,45 @@ public sealed class ReviewEngine(StateStore store)
         return new(exit,envelope);
     }
     void CheckCancel(RunRow run,CancellationToken ct){ct.ThrowIfCancellationRequested();if(store.CancelRequested(run))throw new OperationCanceledException();}
+    async Task<(string Wire,int Http)> SendFixture(Plan p,RunRow run,AttemptRow a,ReviewerProfile reviewer,RequestPlan request,CancellationToken cancellation)
+    {
+        var fixture=Planner.SelectFixture(p,request);
+        try
+        {
+            for(int waited=0;waited<fixture.DelayMs;waited+=25){CheckCancel(run,cancellation);await Task.Delay(Math.Min(25,fixture.DelayMs-waited),cancellation);}
+            CheckCancel(run,cancellation);
+        }
+        catch(OperationCanceledException){store.Unknown(a.Id,"cancelled_in_flight");throw;}
+        if(fixture.Status is "unknown" or "timeout" or "network_error" or "not_sent")
+        {store.Unknown(a.Id,fixture.Status=="not_sent"?"synthetic_not_sent_confirmed":"dispatch_outcome_unknown");throw new ReviewError(13,"reconciliation_required");}
+        return(WireAdapters.WrapFixture(reviewer,fixture),fixture.HttpStatus);
+    }
+    async Task<(string Wire,int Http)> SendLive(RunRow run,AttemptRow a,ReviewerProfile reviewer,RequestPlan request,CancellationToken cancellation)
+    {
+        // The request in flight is cancelled through a linked token when Ctrl+C arrives or the cancel control file appears.
+        using var watch=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        var watcher=WatchCancel(run,watch);
+        TransportResult sent;
+        try{sent=await live!.SendAsync(reviewer,request.Body,watch.Token);}
+        catch(OperationCanceledException){store.Unknown(a.Id,"cancelled_in_flight");throw;}
+        catch(ReviewError e){store.Unknown(a.Id,e.Code);throw new ReviewError(13,"reconciliation_required");}
+        finally{await watch.CancelAsync();await watcher;}
+        if(sent.Outcome!="received"){store.Unknown(a.Id,sent.ErrorCode??"dispatch_outcome_unknown");throw new ReviewError(13,"reconciliation_required");}
+        return(sent.Body??"{}",sent.StatusCode);
+    }
+    async Task WatchCancel(RunRow run,CancellationTokenSource cts)
+    {
+        try
+        {
+            while(!cts.IsCancellationRequested)
+            {
+                bool requested;try{requested=store.CancelRequested(run);}catch(ReviewError){requested=true;}
+                if(requested){await cts.CancelAsync();return;}
+                await Task.Delay(250,cts.Token);
+            }
+        }
+        catch(OperationCanceledException){}
+    }
     void ProcessSaved(Plan p,RunRow run,AttemptRow a)
     {
         var req=p.Requests.Single(q=>q.Id==a.RequestId);var reviewer=p.Reviewers.Single(r=>r.Id==req.ReviewerId);
@@ -118,7 +157,7 @@ public sealed class ReviewEngine(StateStore store)
             // A model that reports "error" in a valid payload is an unusable unit, not a provider failure that stops the pass.
             string? code=valid?null:response.Status=="success"?response.Disposition:response.Status==WireAdapters.InvalidPayload?"invalid_reviewer_payload":
                 response.Status=="error"&&saved.HttpStatus<400?"model_reported_error":response.Status;
-            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw","synthetic",validation,response.Disposition,valid,CoreBytes(p,req),findings,code);
+            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw",Transport(p),validation,response.Disposition,valid,CoreBytes(p,req),findings,code);
         }
         catch(ReviewError e){unit=Invalid(p,req,e.Code);}
         if(!response.Usage.Known){store.Uncertain(a,unit,"cost_unknown");return;}
@@ -127,7 +166,9 @@ public sealed class ReviewEngine(StateStore store)
         try{cost=WireAdapters.Cost(response.Usage,price);}catch(ReviewError e){store.Uncertain(a,unit,e.Code);return;}
         store.Settle(a,unit,cost);
     }
-    static UnitResult Invalid(Plan p,RequestPlan req,string error)=>new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw","synthetic","invalid","not_reported",false,CoreBytes(p,req),[],error);
+    static string Transport(Plan p)=>p.ExecutionMode=="live"?"response_received":"synthetic";
+    static List<string> Limits(Plan p)=>p.ExecutionMode=="live"?Envelope.LiveLimitations:new Envelope().Limitations;
+    static UnitResult Invalid(Plan p,RequestPlan req,string error)=>new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw",Transport(p),"invalid","not_reported",false,CoreBytes(p,req),[],error);
     static int CoreBytes(Plan p,RequestPlan req)=>req.Stage=="relation"?0:p.Chunks.Single(c=>c.SourceId==req.SourceId&&c.Index==req.ChunkIndex).End-p.Chunks.Single(c=>c.SourceId==req.SourceId&&c.Index==req.ChunkIndex).Start;
     public static List<Finding> ValidateFindings(Plan p,RequestPlan req,IReadOnlyList<FixtureFinding> candidates)
     {
@@ -161,16 +202,17 @@ public sealed class ReviewEngine(StateStore store)
     {
         SourceReader.VerifyPartition(p.Sources.Where(s=>s.Role=="target"),p.Chunks);
         Data.Require(p.Requests.Select(q=>q.UnitId).Distinct().Count()==p.Requests.Count,"duplicate_unit",13);
-        var valid=p.Requests.Where(q=>units.Any(u=>u.UnitId==q.UnitId&&u.RequestId==q.Id&&u.Valid&&u.Exposure=="raw"&&u.TransportState=="synthetic"&&u.ValidationState=="valid"&&u.ReviewDisposition is "finding" or "no_finding")).ToList();
+        var valid=p.Requests.Where(q=>units.Any(u=>u.UnitId==q.UnitId&&u.RequestId==q.Id&&u.Valid&&u.Exposure=="raw"&&u.TransportState==Transport(p)&&u.ValidationState=="valid"&&u.ReviewDisposition is "finding" or "no_finding")).ToList();
         long total=p.Requests.Sum(q=>(long)CoreBytes(p,q)),done=valid.Sum(q=>(long)CoreBytes(p,q));
-        var validIds=valid.Select(q=>q.Id).ToHashSet();
+        var validIds=valid.Select(q=>q.Id).ToHashSet();bool live=p.ExecutionMode=="live";decimal? ratio=total==0?null:(decimal)done/total;
         var pairs=p.Requests.GroupBy(q=>(q.CriterionId,q.ReviewerId,q.Stage)).Select(g=>
         {
             long pairTotal=g.Sum(q=>(long)CoreBytes(p,q)),pairDone=g.Where(q=>validIds.Contains(q.Id)).Sum(q=>(long)CoreBytes(p,q));
-            return new PairCoverage(g.Key.CriterionId,g.Key.ReviewerId,g.Key.Stage,g.Count(),g.Count(q=>validIds.Contains(q.Id)),pairTotal,pairDone,pairTotal==0?null:(decimal)pairDone/pairTotal,null);
+            decimal? pairRatio=pairTotal==0?null:(decimal)pairDone/pairTotal;
+            return new PairCoverage(g.Key.CriterionId,g.Key.ReviewerId,g.Key.Stage,g.Count(),g.Count(q=>validIds.Contains(q.Id)),pairTotal,pairDone,live?null:pairRatio,live?pairRatio:null);
         }).ToList();
         var empty=p.Sources.Where(s=>s.Role=="target"&&s.ByteLength==0).Select(s=>s.Id).ToList();
-        return new(p.Requests.Count,valid.Count,total,done,total==0?null:(decimal)done/total,null,valid.Count==p.Requests.Count,p.Requests.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
+        return new(p.Requests.Count,valid.Count,total,done,live?null:ratio,live?ratio:null,valid.Count==p.Requests.Count,p.Requests.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
     }
     bool HasValidUnits(Plan p,RunRow run)=>CoverageFor(p,store.Units(run.Id)).ValidUnits>0;
     public Envelope View(string runId,string command="status")
@@ -178,14 +220,16 @@ public sealed class ReviewEngine(StateStore store)
         var r=store.GetRun(runId);var p=store.GetPlan(r.PlanId);var artifacts=store.Artifacts(runId);
         Data.Require(r.Status!="completed"||artifacts.Count>0,"completed_bundle_missing",13);
         if(artifacts.Count>0)BundleWriter.Verify(store.Root,artifacts);
-        return new(){Command=command,RunId=r.Id,PlanId=p.Id,Status=r.Status,ErrorCode=command is "status" or "cancel"?null:r.ErrorCode,RunErrorCode=r.ErrorCode,Coverage=CoverageFor(p,store.Units(runId)),StaleSourceIds=p.Sources.Where(s=>!Data.SourceCurrent(s)).Select(s=>s.Id).ToList(),Cost=store.Costs(runId),OwnerAlive=store.OwnerAlive(r.ProjectId),Artifacts=artifacts};
+        return new(){Command=command,ExecutionMode=p.ExecutionMode,Limitations=Limits(p),RunId=r.Id,PlanId=p.Id,Status=r.Status,ErrorCode=command is "status" or "cancel"?null:r.ErrorCode,RunErrorCode=r.ErrorCode,Coverage=CoverageFor(p,store.Units(runId)),StaleSourceIds=p.Sources.Where(s=>!Data.SourceCurrent(s)).Select(s=>s.Id).ToList(),Cost=store.Costs(runId),OwnerAlive=store.OwnerAlive(r.ProjectId),Artifacts=artifacts};
     }
     Envelope SaveReport(Plan p,RunRow r,string command)
     {
         var units=store.Units(r.Id);var findings=LinkFindings(units.SelectMany(u=>u.Findings).ToList());var coverage=CoverageFor(p,units);
         var comparisons=p.Requests.GroupBy(q=>(q.SourceId,q.ChunkIndex,q.CriterionId,q.Stage)).Select(g=>new{source_id=g.Key.SourceId,chunk=g.Key.ChunkIndex,criterion_id=g.Key.CriterionId,
             reviewers=g.Select(q=>new{reviewer_id=q.ReviewerId,result=units.SingleOrDefault(u=>u.UnitId==q.UnitId)}).ToList()}).ToList();
-        string markdown="# ReviewGate synthetic review\n\nThis is fixture processing, not actual model review or an HGLOS round.\n\n"+Data.Json(coverage)+"\n\n";
+        string markdown=(p.ExecutionMode=="live"
+            ?"# ReviewGate review (live models)\n\nFindings come from real model output checked against the pinned snapshot. Quote and location checks do not prove the claims; this is not an HGLOS round.\n\n"
+            :"# ReviewGate synthetic review\n\nThis is fixture processing, not actual model review or an HGLOS round.\n\n")+Data.Json(coverage)+"\n\n";
         // Model-authored text is escaped so it cannot add links, HTML or headings to the report.
         foreach(var f in findings)
         {
@@ -194,8 +238,8 @@ public sealed class ReviewEngine(StateStore store)
             markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
         }
         string dir=store.PathFor("runs",r.Id,"bundles",Data.Id("bundle"));
-        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode="synthetic",run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
-        var artifacts=BundleWriter.Write(store.Root,dir,files);BundleWriter.Verify(store.Root,artifacts);Checkpoint("bundle_precommit");store.CompleteBundle(r.Id,r.Status,r.ErrorCode,artifacts);
+        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode=p.ExecutionMode,run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
+        var artifacts=BundleWriter.Write(store.Root,dir,files,p.ExecutionMode);BundleWriter.Verify(store.Root,artifacts);Checkpoint("bundle_precommit");store.CompleteBundle(r.Id,r.Status,r.ErrorCode,artifacts);
         return View(r.Id,command);
     }
     static string Md(string text)=>Regex.Replace(text.Replace("\r"," ",StringComparison.Ordinal).Replace("\n"," ",StringComparison.Ordinal),@"([\\`*_{}\[\]()#+\-.!|<>~])",@"\$1");
@@ -209,8 +253,8 @@ public sealed class ReviewEngine(StateStore store)
         Data.Require(format is "json" or "markdown","unsupported_export_format");
         var artifacts=store.Artifacts(runId);Data.Require(artifacts.Count>0,"export_not_ready",13);BundleWriter.Verify(store.Root,artifacts);
         string name=format=="json"?"result.json":"report.md";var input=artifacts.Single(a=>Path.GetFileName(a.Path)==name);
-        var result=BundleWriter.Write(store.Root,dir,new Dictionary<string,string>{{name,File.ReadAllText(Path.Combine(store.Root,input.Path))}});
-        return new(run.Status=="completed"?0:20,new Envelope{Command="export",RunId=runId,PlanId=plan.Id,Status=run.Status,Artifacts=result,Coverage=coverage,StaleSourceIds=plan.Sources.Where(s=>!Data.SourceCurrent(s)).Select(s=>s.Id).ToList()});
+        var result=BundleWriter.Write(store.Root,dir,new Dictionary<string,string>{{name,File.ReadAllText(Path.Combine(store.Root,input.Path))}},plan.ExecutionMode);
+        return new(run.Status=="completed"?0:20,new Envelope{Command="export",ExecutionMode=plan.ExecutionMode,Limitations=Limits(plan),RunId=runId,PlanId=plan.Id,Status=run.Status,Artifacts=result,Coverage=coverage,StaleSourceIds=plan.Sources.Where(s=>!Data.SourceCurrent(s)).Select(s=>s.Id).ToList()});
     }
     static void Checkpoint(string stage)
     {

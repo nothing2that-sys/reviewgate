@@ -44,15 +44,19 @@ try {
     Copy-Item -Path '.work/publish/*' -Destination $temporary -Recurse
     $dll = Join-Path $temporary 'ReviewGate.Cli.dll'
     $version = & dotnet $dll --version
-    if ($LASTEXITCODE -ne 0 -or $version -ne 'ReviewGate 0.1.0-offline') { throw 'Packaged version smoke failed' }
-    $live = (& dotnet $dll plan --execution-mode live) -join "`n"
-    if ($LASTEXITCODE -ne 14 -or ($live | ConvertFrom-Json).error_code -ne 'live_not_available') { throw 'Packaged live guard failed' }
+    if ($LASTEXITCODE -ne 0 -or $version -ne 'ReviewGate 0.2.0-live-preview') { throw 'Packaged version smoke failed' }
+    # Live work must go plan -> interactive grant -> exec; a direct live exec is refused before any state or network use.
+    $live = (& dotnet $dll exec --execution-mode live) -join "`n"
+    if ($LASTEXITCODE -ne 2 -or ($live | ConvertFrom-Json).error_code -ne 'live_requires_plan_then_grant') { throw 'Packaged live guard failed' }
+    # Key entry refuses redirected stdin, so no script or agent can feed a key through this path.
+    $keyGuard = ('' | & dotnet $dll credential set --provider openai) -join "`n"
+    if ($LASTEXITCODE -ne 2 -or ($keyGuard | ConvertFrom-Json).error_code -ne 'interactive_console_required') { throw 'Packaged credential guard failed' }
     foreach($assemblyPath in Get-ChildItem $temporary -Filter 'ReviewGate.*.dll') { [void][Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($assemblyPath.FullName) }
     foreach($name in @('ReviewGate.Core.Execution.ReviewEngine','ReviewGate.Infrastructure.StateStore')) {
         $type = [AppDomain]::CurrentDomain.GetAssemblies().GetTypes() | Where-Object { $_.FullName -eq $name }
         if (!$type -or $type.GetProperty('FaultObserver')) { throw 'Release fault seam exclusion failed' }
     }
     & ./scripts/offline-demo.ps1 -CliDll $dll | Set-Content -LiteralPath (Join-Path $Results 'publish-demo.json') -Encoding utf8NoBOM
-    [ordered]@{git_head=$head;version=$version;live_exit=14;release_fault_seams='absent_by_reflection';temporary_publish_directory=$temporary;framework_dependent=$true;network_and_credential_evidence='not_measured_here_see_summary'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Results 'publish-smoke.json') -Encoding utf8NoBOM
+    [ordered]@{git_head=$head;version=$version;direct_live_exec_exit=2;redirected_key_entry_exit=2;release_fault_seams='absent_by_reflection';temporary_publish_directory=$temporary;framework_dependent=$true;network_and_credential_evidence='not_measured_here_see_summary'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Results 'publish-smoke.json') -Encoding utf8NoBOM
 }
 finally { Pop-Location }

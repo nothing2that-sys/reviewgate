@@ -67,9 +67,18 @@ public sealed class OfflineE2E
     }
     [Fact] public void ProductSourcesContainNoNetworkOrCredentialImplementation()
     {
-        // This suite fails on accidental addition of the forbidden production edges. CLI only uses the OS path to its state directory.
-        string[] forbidden=["HttpClient", "WebRequest", "Socket(", "CredentialManager", "PasswordVault", "OPENAI_API_KEY", "TOGETHER_API_KEY", "GOOGLE_API_KEY", "Process.Start", "GetEnvironmentVariable"];
-        foreach(var file in Directory.EnumerateFiles(Path.Combine(TestEnvironment.Repository,"src"),"*.cs",SearchOption.AllDirectories).Where(p=>!p.Contains(Path.DirectorySeparatorChar+"obj"+Path.DirectorySeparatorChar)))
-            foreach(var word in forbidden)Assert.DoesNotContain(word,File.ReadAllText(file).Replace("// Pure wire transformations. No HttpClient, socket, SDK, keyring, credential or environment access.","",StringComparison.Ordinal));
+        // Network and credential-store code may exist only in the Transport.Http project; nothing anywhere reads
+        // keys from the environment, starts processes, or uses another endpoint than the three fixed provider URLs.
+        string src=Path.Combine(TestEnvironment.Repository,"src"),transport=Path.Combine(src,"ReviewGate.Transport.Http")+Path.DirectorySeparatorChar;
+        string[] network=["HttpClient", "WebRequest", "Socket(", "advapi32", "PasswordVault"];
+        string[] everywhere=["OPENAI_API_KEY", "TOGETHER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "Process.Start", "GetEnvironmentVariable"];
+        foreach(var file in Directory.EnumerateFiles(src,"*.cs",SearchOption.AllDirectories).Where(p=>!p.Contains(Path.DirectorySeparatorChar+"obj"+Path.DirectorySeparatorChar)))
+        {
+            string text=File.ReadAllText(file).Replace("// Pure wire transformations. No HttpClient, socket, SDK, keyring, credential or environment access.","",StringComparison.Ordinal);
+            foreach(var word in everywhere)Assert.DoesNotContain(word,text);
+            if(!file.StartsWith(transport,StringComparison.OrdinalIgnoreCase))foreach(var word in network)Assert.DoesNotContain(word,text);
+            else foreach(System.Text.RegularExpressions.Match url in System.Text.RegularExpressions.Regex.Matches(text,"https?://[^\"\\s]+"))
+                Assert.Contains(url.Value,new[]{"https://api.openai.com/v1/responses","https://api.together.ai/v1/chat/completions","https://generativelanguage.googleapis.com/v1beta/interactions"});
+        }
     }
 }

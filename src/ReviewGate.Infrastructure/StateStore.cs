@@ -11,10 +11,15 @@ public sealed class StateStore : IDisposable
     readonly SqliteConnection db;
     readonly Func<DateTimeOffset> now;
     public string Root { get; }
+    // "synthetic" or "live": separate ledgers, grants and artifacts; IDs carry the namespace so a run is never opened in the wrong one.
+    public string Namespace { get; }
     public DateTimeOffset Now => now();
-    public StateStore(string root, Func<DateTimeOffset>? clock=null)
+    public string NewId(string kind)=>Data.Id(Namespace=="live"?"l"+kind:kind);
+    public static string NamespaceOf(string id)=>id.StartsWith("lplan_",StringComparison.Ordinal)||id.StartsWith("lrun_",StringComparison.Ordinal)?"live":"synthetic";
+    public StateStore(string root, Func<DateTimeOffset>? clock=null, string ns="synthetic")
     {
-        Root=Path.Combine(Path.GetFullPath(root),"synthetic");now=clock??(()=>DateTimeOffset.UtcNow);
+        Data.Require(ns is "synthetic" or "live","invalid_execution_mode");Namespace=ns;
+        Root=Path.Combine(Path.GetFullPath(root),ns);now=clock??(()=>DateTimeOffset.UtcNow);
         NoLinks(Root);NoLinks(Path.Combine(Root,"state.db"));
         Directory.CreateDirectory(Root);
         db=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path.Combine(Root,"state.db"),ForeignKeys=true,DefaultTimeout=5,Pooling=false}.ToString());
@@ -31,6 +36,7 @@ public sealed class StateStore : IDisposable
           CREATE TABLE IF NOT EXISTS units(run_id TEXT NOT NULL REFERENCES runs(id),unit_id TEXT NOT NULL,json TEXT NOT NULL, PRIMARY KEY(run_id,unit_id));
           CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS bundles(run_id TEXT PRIMARY KEY REFERENCES runs(id),json TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS grant_issuance(grant_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL REFERENCES plans(id),hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL);
           """);
         Data.Require(Scalar("PRAGMA foreign_keys;")=="1","state_store_corrupt",13);
     }
@@ -58,7 +64,7 @@ public sealed class StateStore : IDisposable
     }
     public RunRow NewRun(Plan plan)
     {
-        var r=new RunRow(Data.Id("run"),plan.Id,plan.ProjectId,"ready",Data.Id("owner"),null,Now);
+        var r=new RunRow(NewId("run"),plan.Id,plan.ProjectId,"ready",Data.Id("owner"),null,Now);
         Exec("INSERT INTO runs VALUES($i,$p,$j,$s,$g,NULL,$c)",null,("$i",r.Id),("$p",r.PlanId),("$j",r.ProjectId),("$s",r.Status),("$g",r.Generation),("$c",r.CreatedAt.ToString("O")));
         return r;
     }
@@ -95,7 +101,7 @@ public sealed class StateStore : IDisposable
     public static void CheckGrant(Grant g,Plan p,RunRow run,DateTimeOffset time)
     {
         Data.VersionIs(g.SchemaVersion);ValidId(g.Id);
-        Data.Require(g.ExecutionMode=="synthetic"&&g.PlanHash==p.Hash&&g.ManifestHash==p.ManifestHash
+        Data.Require(g.ExecutionMode==p.ExecutionMode&&g.PlanHash==p.Hash&&g.ManifestHash==p.ManifestHash
             &&(g.RunId is null||g.RunId==run.Id),"grant_scope_mismatch",10);
         Data.Require(g.ExpiresAt>time,"grant_expired",10);
         Data.Require(g.MaxUsd>0&&g.MaxRequests>0&&g.MaxRetries>=0,"invalid_grant",10);
@@ -140,10 +146,17 @@ public sealed class StateStore : IDisposable
             &&all.Where(a=>a.Month==month||IsHeld(a.Phase)).Sum(Held)+amount<=plan.Budget.MonthUsd,"budget_exhausted",12);
         var row=new AttemptRow(Data.Id("attempt"),run.Id,request.Id,grant.Id,"reserved",amount,null,month,null,null,null);
         Exec("INSERT INTO attempts VALUES($i,$r,$q,$g,'reserved',$a,NULL,$m,NULL,NULL,NULL)",tx,("$i",row.Id),("$r",row.RunId),("$q",row.RequestId),("$g",row.GrantId),("$a",Money(amount)),("$m",month));
-        Event(row.Id,"reserve",amount,"synthetic_bound",tx);tx.Commit();return row;
+        Event(row.Id,"reserve",amount,Namespace+"_bound",tx);tx.Commit();return row;
     }
     // Cost month is attributed to the dispatch intent time, not the reservation time.
     public void Dispatch(string id)=>Data.Require(Exec("UPDATE attempts SET phase='dispatch_intent',month=$m WHERE id=$i AND phase='reserved'",null,("$i",id),("$m",Month(Now)))==1,"invalid_request_transition",13);
+    // Live grants are valid only when this store issued them through the interactive grant command.
+    public void RecordGrantIssue(Plan p,Grant g,string channel)
+    {
+        Data.Require(g.PlanHash==p.Hash&&g.ManifestHash==p.ManifestHash&&g.ExecutionMode==p.ExecutionMode,"grant_scope_mismatch",10);
+        Exec("INSERT INTO grant_issuance VALUES($g,$p,$h,$c,$t)",null,("$g",g.Id),("$p",p.Id),("$h",Data.Hash(Data.Json(g))),("$c",channel),("$t",Now.ToString("O")));
+    }
+    public bool IsGrantIssued(Grant g)=>Scalar("SELECT hash FROM grant_issuance WHERE grant_id=$g",null,("$g",g.Id))==Data.Hash(Data.Json(g));
     public void RevokeGrant(string id){ValidId(id);Exec("INSERT OR IGNORE INTO grant_revocations VALUES($i,$t)",null,("$i",id),("$t",Now.ToString("O")));}
     public void EnsureGrantActive(string id)=>Data.Require(Scalar("SELECT id FROM grant_revocations WHERE id=$i",null,("$i",id)) is null,"grant_revoked",10);
     public string ResponseFile(AttemptRow a)=>PathFor("runs",a.RunId,a.Id+".response.json");
@@ -167,7 +180,7 @@ public sealed class StateStore : IDisposable
         Data.Require(phase=="response_saved","invalid_request_transition",13);
         Exec("INSERT OR REPLACE INTO units VALUES($r,$u,$j)",tx,("$r",a.RunId),("$u",unit.UnitId),("$j",Data.Json(unit)));
         Exec("UPDATE attempts SET phase='settled',cost=$c,error=$e WHERE id=$i",tx,("$c",Money(cost)),("$e",unit.ErrorCode),("$i",a.Id));
-        Event(a.Id,"settle",cost,"usage_calculated_synthetic",tx);tx.Commit();
+        Event(a.Id,"settle",cost,"usage_calculated_"+Namespace,tx);tx.Commit();
     }
     public List<UnitResult> Units(string runId)
     {using var c=Cmd("SELECT json FROM units WHERE run_id=$r",null,("$r",runId));using var r=c.ExecuteReader();var result=new List<UnitResult>();while(r.Read())result.Add(Data.Parse<UnitResult>(r.GetString(0)));return result;}
@@ -199,7 +212,7 @@ public sealed class StateStore : IDisposable
     }
     public void Resolve(RunRow run,Plan plan,ResolutionFixture fixture)
     {
-        Data.VersionIs(fixture.SchemaVersion);Data.Require(fixture.ExecutionMode=="synthetic"&&fixture.PlanHash==plan.Hash,"resolution_scope_mismatch",13);
+        Data.VersionIs(fixture.SchemaVersion);Data.Require(fixture.ExecutionMode==plan.ExecutionMode&&fixture.PlanHash==plan.Hash,"resolution_scope_mismatch",13);
         Data.Require(fixture.Resolutions.Select(x=>x.AttemptId).Distinct().Count()==fixture.Resolutions.Count,"duplicate_resolution",2);
         using var tx=db.BeginTransaction();
         foreach(var item in fixture.Resolutions)
@@ -227,7 +240,7 @@ public sealed class StateStore : IDisposable
     }
     public JsonObject Costs(string runId)
     {
-        var a=Attempts(runId);return new(){["mode"]="synthetic",["usage_calculated_usd"]=a.Where(x=>x.Phase=="settled"&&x.ErrorCode!="resolved_conservative_full_reservation").Sum(x=>x.CostUsd??0),
+        var a=Attempts(runId);return new(){["mode"]=Namespace,["usage_calculated_usd"]=a.Where(x=>x.Phase=="settled"&&x.ErrorCode!="resolved_conservative_full_reservation").Sum(x=>x.CostUsd??0),
             ["assumed_usd"]=a.Where(x=>x.Phase=="settled"&&x.ErrorCode=="resolved_conservative_full_reservation").Sum(x=>x.CostUsd??0),
             ["reserved_usd"]=a.Where(x=>IsHeld(x.Phase)&&x.Phase!="unknown").Sum(x=>x.ReservationUsd),["unknown_hold_usd"]=a.Where(x=>x.Phase=="unknown").Sum(x=>x.ReservationUsd),["billed_usd"]=null};
     }

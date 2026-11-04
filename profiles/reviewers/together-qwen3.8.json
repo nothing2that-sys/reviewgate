@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"together-qwen3.8","hosting_provider":"together","model_id":"Qwen/Qwen3.8-2.4T-A95B","api_profile":"chat_completions","canonical_model_key":"qwen/qwen3.8-2.4t-a95b","model_developer":"alibaba-qwen","model_version":"","input_token_upper_bound":16384,"max_output_tokens":8192,"max_reasoning_tokens":0,"max_request_bytes":65536,"timeout_seconds":600}

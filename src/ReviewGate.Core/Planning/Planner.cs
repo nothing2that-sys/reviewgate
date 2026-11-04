@@ -8,7 +8,7 @@ namespace ReviewGate.Core.Planning;
 
 public record PlanInput(string Project,string SourceRoot,string? RepositoryRoot,string InputClass,
     string Instruction,string ProfileFile,List<string> ReviewerFiles,string BudgetFile,string PriceFile,
-    string FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null);
+    string? FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null);
 public static class Planner
 {
     public static Plan Build(StateStore store,PlanInput input)
@@ -21,7 +21,10 @@ public static class Planner
         Data.Require(!SafePath.Within(store.Root,root)&&!SafePath.Within(root,store.Root),"state_source_overlap");
         string? repo=input.RepositoryRoot is null?null:SafePath.Full(input.RepositoryRoot);
         if(repo is not null){SafePath.NoLinks(repo);Data.Require(SafePath.Within(root,repo)&&(File.Exists(Path.Combine(repo,".git"))||Directory.Exists(Path.Combine(repo,".git"))),"invalid_repository_root");}
-        var pinPaths=new[]{input.ProfileFile,input.BudgetFile,input.PriceFile,input.FixtureFile}.Concat(input.ReviewerFiles).Select(Path.GetFullPath).ToList();
+        bool live=store.Namespace=="live";
+        // Live plans never take a fixture; synthetic plans always need one. Neither can stand in for the other.
+        Data.Require(live?input.FixtureFile is null:input.FixtureFile is not null,live?"fixture_not_allowed_in_live":"fixture_required");
+        var pinPaths=new[]{input.ProfileFile,input.BudgetFile,input.PriceFile}.Concat(live?Array.Empty<string>():new[]{input.FixtureFile!}).Concat(input.ReviewerFiles).Select(Path.GetFullPath).ToList();
         foreach(var path in pinPaths){SafePath.NoLinks(path);Data.Require(File.Exists(path),"input_unavailable");}
         var pins=pinPaths.Select(p=>new InputPin(p,Data.FileHash(p))).ToList();
         var profile=Data.Read<ReviewProfile>(input.ProfileFile);Validate(profile);
@@ -39,8 +42,15 @@ public static class Planner
             &&Regex.IsMatch(prices.DocumentSha256??"", "^[a-fA-F0-9]{64}$")&&prices.EffectiveFrom<=store.Now&&store.Now<prices.EffectiveTo,"price_snapshot_unavailable",12);
         Data.Require(prices.Prices.Select(x=>x.CanonicalModelKey).Distinct().Count()==prices.Prices.Count,"ambiguous_prices",12);
         foreach(var price in prices.Prices)Data.Require(price.InputPerMillion>=0&&price.OutputPerMillion>=0&&price.CachedInputPerMillion>=0&&price.ReasoningPerMillion>=0,"invalid_price",12);
-        var fixture=Data.Read<FixtureBundle>(input.FixtureFile);Data.VersionIs(fixture.SchemaVersion);
-        Data.Require(fixture.Responses is not null&&fixture.Responses.Count>0,"invalid_fixture");
+        foreach(var r in reviewers.Where(r=>live&&r.HostingProvider=="google"))
+        {
+            // Google thinking cannot be capped through the API; a declared bound and a separately billed reasoning row are required.
+            Data.Require(r.MaxReasoningTokens>0,"unbounded_request",12);
+            var row=prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==r.CanonicalModelKey);
+            Data.Require(row is null||(!row.OutputIncludesReasoning&&row.ReasoningPerMillion>=row.OutputPerMillion),"price_reasoning_rule_mismatch",12);
+        }
+        var fixture=live?new FixtureBundle(Data.Version,"live-none",[]):Data.Read<FixtureBundle>(input.FixtureFile!);Data.VersionIs(fixture.SchemaVersion);
+        Data.Require(live||fixture.Responses is {Count:>0},"invalid_fixture");
         foreach(var f in fixture.Responses)Data.Require(f.DelayMs>=0&&f.DelayMs<=600_000,"invalid_fixture_delay");
         var selectedFindings=new List<Finding>();
         if(input.Mode=="verify")
@@ -54,12 +64,12 @@ public static class Planner
         }
         else Data.Require(input.BaseRun is null&&input.Findings is not {Count:>0},"unexpected_verification_target");
         var directoryPins=input.Inputs.Concat(input.References).Select(x=>SafePath.Input(x,root)).Where(Directory.Exists).Select(x=>new InputPin(x,SourceReader.InventoryHash(x))).ToList();
-        string id=Data.Id("plan");var capture=SourceReader.Capture(root,repo,input.Inputs,input.References,store.NewSnapshotDir(id),profile.ChunkBytes,profile.ContextBytes);
+        string id=store.NewId("plan");var capture=SourceReader.Capture(root,repo,input.Inputs,input.References,store.NewSnapshotDir(id),profile.ChunkBytes,profile.ContextBytes);
         foreach(var s in capture.Sources.Where(s=>IsDiff(s.OriginalPath)))
             Data.CreateFile(Path.Combine(Path.GetDirectoryName(s.RawPath)!,s.Id+".diff-map.json"),Data.Json(UnifiedDiff.Parse(File.ReadAllText(s.TextPath))));
         var sources=capture.Sources.Select(s=>s with{ExportPath=IsDiff(s.OriginalPath)?null:s.ExportPath}).ToList();
         if(input.Mode=="verify")Data.Require(selectedFindings.All(f=>sources.Any(s=>s.Id==f.SourceId)),"verification_snapshot_mismatch",13);
-        var p=new Plan{Id=id,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
+        var p=new Plan{Id=id,ExecutionMode=store.Namespace,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
             InstructionHash=Data.Hash(input.Instruction),Profile=profile,Reviewers=reviewers,Budget=budget,Prices=prices,Fixture=fixture,
             Pins=pins,DirectoryPins=directoryPins,Sources=sources,Exclusions=capture.Exclusions,Chunks=capture.Chunks,Mode=input.Mode,BaseRun=input.BaseRun,FindingIds=input.Findings??[]};
         foreach(var reviewer in reviewers)
@@ -75,11 +85,11 @@ public static class Planner
                         sources.Where(s=>s.Role=="reference").Select(s=>new SpanRef(s.Id,0,s.ByteLength)).Prepend(new(chunk.SourceId,chunk.ContextStart,chunk.ContextEnd)).ToList();
                     var context=spans.Select(span=>new{source_id=span.SourceId,path=sources.Single(s=>s.Id==span.SourceId).LogicalPath,start_byte=span.Start,end_byte=span.End,
                         text=Data.Utf8.GetString(File.ReadAllBytes(sources.Single(s=>s.Id==span.SourceId).TextPath).AsSpan(span.Start,span.End-span.Start))}).ToList();
-                    string payload=Data.Json(new{execution_mode="synthetic",instruction=input.Instruction,criterion,core=new{source_id=chunk.SourceId,start_byte=chunk.Start,end_byte=chunk.End},sources=context,
+                    string payload=Data.Json(new{execution_mode=store.Namespace,instruction=input.Instruction,criterion,core=new{source_id=chunk.SourceId,start_byte=chunk.Start,end_byte=chunk.End},sources=context,
                         verification_target=input.Mode=="verify"?selectedFindings:null});
                     string body=WireAdapters.Build(reviewer,payload);string unit=Data.Hash(reviewer.Id+"\n"+criterion.Id+"\n"+chunk.Id);
                     var request=new RequestPlan(Data.Id("request"),unit,reviewer.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,body,Data.Hash(body),WireAdapters.Reservation(reviewer,price,body),criterion.Scope);
-                    _=SelectFixture(p,request);p.Requests.Add(request);
+                    if(!live)_=SelectFixture(p,request);p.Requests.Add(request);
                 }
             }
         }

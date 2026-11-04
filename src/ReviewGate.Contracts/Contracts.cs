@@ -78,7 +78,7 @@ public record ReviewProfile(string SchemaVersion, string Id, string Kind, List<C
 public record ReviewerProfile(string SchemaVersion, string Id, string HostingProvider, string ModelId,
     string ApiProfile, string CanonicalModelKey, string ModelDeveloper = "unknown", string ModelVersion = "",
     int InputTokenUpperBound = 4096, int MaxOutputTokens = 1024, int MaxReasoningTokens = 0,
-    int MaxRequestBytes = 65536);
+    int MaxRequestBytes = 65536, string? ReasoningEffort = null, int TimeoutSeconds = 300);
 public record BudgetPolicy(string SchemaVersion, decimal RunUsd, decimal ProjectUsd, decimal MonthUsd,
     int MaxRequests = 100, int MaxRetries = 0, string Currency = "USD", string Timezone = "+09:00");
 public record PriceRow(string CanonicalModelKey, decimal InputPerMillion, decimal OutputPerMillion,
@@ -127,6 +127,7 @@ public sealed record Plan
     public string InstructionHash { get; init; } = "";
     public string InputClass { get; init; } = "";
     public string Mode { get; init; } = "single";
+    public string ExecutionMode { get; init; } = "synthetic";
     public string? BaseRun { get; init; }
     public List<string> FindingIds { get; init; } = [];
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
@@ -182,6 +183,25 @@ public sealed record Envelope
     public Coverage? Coverage { get; init; }
     public List<string> StaleSourceIds {get;init;}=[];
     public JsonNode? Cost { get; init; }
+    public JsonObject? Details { get; init; }
     public List<string> Limitations { get; init; } = ["synthetic_only", "no_actual_model_review", "not_an_hglos_round"];
+    public static readonly List<string> LiveLimitations = ["live_model_review", "review_quality_not_verified", "usage_based_cost_not_invoice", "not_an_hglos_round"];
+}
+// Transport for live dispatch. Received means the provider answered (any HTTP status); Unknown means
+// the request may have been sent but no complete answer was received (timeout, connection loss, oversize).
+public record TransportResult(string Outcome, int StatusCode, string? Body, string? ErrorCode)
+{
+    public static TransportResult Unknown(string code) => new("unknown", 0, null, code);
+}
+public interface IModelTransport
+{
+    bool HasCredential(string provider);
+    Task<TransportResult> SendAsync(ReviewerProfile reviewer, string body, CancellationToken cancellation);
+}
+public interface ICredentialStore
+{
+    string? Read(string provider);
+    void Write(string provider, string secret);
+    bool Delete(string provider);
 }
 public record CommandResult(int ExitCode, Envelope Result, string? OutputPath = null);

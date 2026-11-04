@@ -10,7 +10,8 @@ OpenAI, Together AI, Google AI의 제공자와 모델을 선택하여 소설 원
 
 - 프로젝트명: **ReviewGate**
 - 저장소: [nothing2that-sys/reviewgate](https://github.com/nothing2that-sys/reviewgate)
-- 단계: **v0.1 오프라인 검증판 한정 종결(2026-11-04)** — synthetic fixture만 사용한 로컬 검증. 실제 모델 검수 품질·실서버 호환·운영은 범위 밖이며, 받아들인 잔여는 [검토 기록](validation/offline-v0.1/IMPLEMENTATION_REVIEW_20261104.md)에 있습니다
+- 단계: **v0.2 실연결 구현 중** — OpenAI·Together·Google 실제 API 경로, Windows 자격 증명 관리자 키 보관, 대화형 live grant를 구현하고 mock HTTP로 검증했습니다. 실서버 첫 호출은 사용자 키 입력 후 진행합니다. [설계](docs/LIVE_CONNECTION_V0_2.md)
+- 이전 단계: v0.1 오프라인 검증판 한정 종결(2026-11-04). 받아들인 잔여는 [검토 기록](validation/offline-v0.1/IMPLEMENTATION_REVIEW_20261104.md)에 있습니다
 - Windows .NET 10 CLI: `plan`, `exec`, `status`, `cancel`, `resume`, `export`. 실행은 고정 synthetic fixture만 사용합니다.
 - 실제 모델 API 호출·키 조회/발급/입력/저장/연결: **없음**. 구현은 새 맥락 Claude Code 검토 2회(1차 지적, 1차 수정본 독립 검토)를 거쳤고, 2차 수정은 자체 검증만 거쳤습니다.
 

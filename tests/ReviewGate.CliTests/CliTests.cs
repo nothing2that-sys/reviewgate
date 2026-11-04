@@ -35,10 +35,22 @@ public sealed class CliTests
     [InlineData("--project","other")]
     public async Task InvalidOrDuplicateOptionsFail(string option,string value)
     {using var e=new TestEnvironment();Assert.Equal(2,(await CliHost.RunAsync([..e.PlanArgs(),option,value])).ExitCode);}
-    [Fact] public async Task LiveBlockedBeforeStateCreation()
+    [Fact] public async Task LiveNeedsPlanThenInteractiveGrantAndNeverTakesKeysOrFixtures()
     {
-        using var e=new TestEnvironment();var r=await TestEnvironment.Invoke([..e.PlanArgs(),"--execution-mode","live"]);
-        Assert.Equal(14,r.Exit);Assert.False(Directory.Exists(e.State));Assert.Equal("live_not_available",Data.Parse<Envelope>(r.Stdout).ErrorCode);
+        using var e=new TestEnvironment();
+        // Direct live exec is refused before any state exists.
+        var direct=await TestEnvironment.Invoke([..e.PlanArgs("exec"),"--execution-mode","live"]);
+        Assert.Equal(2,direct.Exit);Assert.False(Directory.Exists(e.State));Assert.Equal("live_requires_plan_then_grant",Data.Parse<Envelope>(direct.Stdout).ErrorCode);
+        var withFixture=await TestEnvironment.Invoke([..e.PlanArgs(),"--execution-mode","live"]);Assert.Equal("fixture_not_allowed_in_live",Data.Parse<Envelope>(withFixture.Stdout).ErrorCode);
+        string[] liveArgs=[..e.PlanArgs().TakeWhile(a=>a!="--fixture"),..e.PlanArgs().SkipWhile(a=>a!="--fixture").Skip(2),"--execution-mode","live"];
+        var planned=await TestEnvironment.Invoke(liveArgs);Assert.Equal(0,planned.Exit);var plan=Data.Parse<Envelope>(planned.Stdout);
+        Assert.StartsWith("lplan_",plan.PlanId);Assert.Equal("live",plan.ExecutionMode);Assert.Equal("issue_live_grant_interactively",plan.RequiredAction);
+        // Grant and key entry require an interactive console; redirected stdin (any automation) is refused.
+        var grant=await TestEnvironment.Invoke(["grant","--state-root",e.State,"--plan",plan.PlanId!,"--max-usd","1"]);
+        Assert.Equal(2,grant.Exit);Assert.Equal("interactive_console_required",Data.Parse<Envelope>(grant.Stdout).ErrorCode);
+        var key=await TestEnvironment.Invoke(["credential","set","--provider","openai"]);
+        Assert.Equal(2,key.Exit);Assert.Equal("interactive_console_required",Data.Parse<Envelope>(key.Stdout).ErrorCode);
+        Assert.Equal("unknown_option",Data.Parse<Envelope>((await TestEnvironment.Invoke(["credential","set","--provider","openai","--key","x"])).Stdout).ErrorCode);
     }
     [Fact] public async Task MissingFixtureIsInputErrorAndNoRun()
     {

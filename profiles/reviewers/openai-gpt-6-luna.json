@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"openai-gpt-6-luna","hosting_provider":"openai","model_id":"gpt-6-luna","api_profile":"responses","canonical_model_key":"openai/gpt-6-luna","model_developer":"openai","model_version":"","input_token_upper_bound":16384,"max_output_tokens":4096,"max_reasoning_tokens":0,"max_request_bytes":65536,"timeout_seconds":300}
