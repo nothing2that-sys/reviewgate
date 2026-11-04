@@ -21,7 +21,7 @@ public static class WireAdapters
         {
             "openai"=>r.ReasoningEffort is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max",
             "google"=>r.ReasoningEffort is "minimal" or "low" or "medium" or "high",
-            _=>r.ReasoningEffort is "none"
+            _=>r.ReasoningEffort is "none" or "low" or "medium" or "high"
         }),"unsupported_reasoning_effort",14);
     }
     public static string Build(ReviewerProfile r,string sourcePayload)
@@ -38,7 +38,10 @@ public static class WireAdapters
         {
             if(r.HostingProvider=="openai")body["reasoning"]=new JsonObject{["effort"]=effort};
             else if(r.HostingProvider=="google")body["generation_config"]!["thinking_level"]=effort;
-            else body["reasoning"]=new JsonObject{["enabled"]=false};
+            // Together: "none" disables reasoning where the model allows it (GLM-5.2); models that cannot disable it
+            // (GLM-5.3) take reasoning_effort. Reasoning and answer share max_tokens, so the budget must cover both.
+            else if(effort=="none")body["reasoning"]=new JsonObject{["enabled"]=false};
+            else body["reasoning_effort"]=effort;
         }
         string json=body.ToJsonString();Data.Require(Data.Utf8.GetByteCount(json)<=r.MaxRequestBytes,"request_context_exceeded",12);return json;
     }
