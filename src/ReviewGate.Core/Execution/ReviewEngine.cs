@@ -29,30 +29,37 @@ public sealed class ReviewEngine(StateStore store)
         if(run.Status=="completed")return new(0,View(run.Id,command));
         store.Recover(run,p);
         if(resolution is not null){Data.Require(recoverOnly,"resolution_requires_recover_only");store.Resolve(run,p,resolution);}
+        // Saved responses need no dispatch: they are settled from the response file and the pinned snapshot,
+        // without a grant or unchanged originals, so an expired grant or an edited source cannot strand their hold.
+        foreach(var saved in store.Attempts(run.Id).Where(a=>a.Phase=="response_saved").ToList())ProcessSaved(p,run,saved);
         bool unknown=store.Attempts(run.Id).Any(a=>a.Phase=="unknown");
         if(unknown)return new(13,SaveReport(p,run with{Status="needs_reconciliation",ErrorCode="reconciliation_required"},command)with{RequiredAction="reconcile_unknown_attempts"});
         if(recoverOnly)return new(0,SaveReport(p,run with{Status=HasValidUnits(p,run)?"partial":"blocked",ErrorCode=null},command)with{RequiredAction="resume_after_recovery"});
         store.NewGeneration(run.Id);run=store.GetRun(run.Id);
+        // Nothing left to dispatch: finishing the bundle needs no grant.
+        if(grant is null&&CoverageFor(p,store.Units(run.Id)).RequiredCoverageComplete&&!store.Attempts(run.Id).Any(a=>a.CostUsd>a.ReservationUsd))
+            return new(0,SaveReport(p,run with{Status="completed",ErrorCode=null},command));
         if(grant is null)return new(10,SaveReport(p,run with{Status=HasValidUnits(p,run)?"partial":"blocked",ErrorCode="grant_required"},command)with{RequiredAction="supply_simulation_grant"});
         store.Status(run.Id,"running");
-        string? error=null;int exit=0;
+        string? error=null;int exit=0;bool retryExhausted=false;
         try
         {
-            store.BindGrant(run,p,grant);
-            var responseAttempts=store.Attempts(run.Id).Where(a=>a.Phase=="response_saved").ToList();
-            foreach(var a in responseAttempts)ProcessSaved(p,run,a);
             if(store.Attempts(run.Id).Any(a=>a.CostUsd>a.ReservationUsd))throw new ReviewError(12,"reservation_overrun");
+            bool grantBound=false;
             foreach(var request in p.Requests)
             {
                 CheckCancel(run,cancellation);
                 if(store.Units(run.Id).Any(u=>u.UnitId==request.UnitId&&u.Valid))continue;
                 if(store.Attempts(run.Id).Any(a=>a.Phase=="unknown"))throw new ReviewError(13,"reconciliation_required");
                 // A request whose retries are used up stays incomplete without blocking the remaining requests.
-                if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));continue;}
+                if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));retryExhausted=true;continue;}
                 StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
+                // Bound in its own transaction before the first reservation, so a failed reservation cannot free it for another run.
+                if(!grantBound){store.BindGrant(run,p,grant);grantBound=true;}
                 var a=store.Reserve(run,p,request,grant);
                 Checkpoint("reserved");CheckCancel(run,cancellation);
                 StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
+                Data.Require(store.Now>=p.Prices.EffectiveFrom&&store.Now<p.Prices.EffectiveTo,"price_snapshot_expired",12);
                 store.Dispatch(a.Id);Checkpoint("dispatch_intent");
                 var fixture=Planner.SelectFixture(p,request);
                 try
@@ -79,6 +86,8 @@ public sealed class ReviewEngine(StateStore store)
         }
         catch(OperationCanceledException){exit=130;error="cancelled";}
         catch(ReviewError e){exit=e.ExitCode;error=e.Code;}
+        // Skipped retry-exhausted requests are a request-limit shortfall (contract exit 12), not a plain partial.
+        if(exit==0&&retryExhausted){exit=12;error="retry_limit_reached";}
         // A known pre-dispatch cancellation leaves a reserved row that can safely be released.
         store.Recover(run,p);
         var coverage=CoverageFor(p,store.Units(run.Id));var attempts=store.Attempts(run.Id);
@@ -106,7 +115,9 @@ public sealed class ReviewEngine(StateStore store)
             var findings=response.Status=="success"?ValidateFindings(p,req,response.Findings):[];
             bool valid=response.Status=="success"&&response.Disposition is "finding" or "no_finding";
             string validation=response.Status switch{"success"=>"valid","truncated"=>"truncated","refused"=>"refused",WireAdapters.InvalidPayload=>"invalid",_=>"failed"};
-            string? code=valid?null:response.Status=="success"?response.Disposition:response.Status==WireAdapters.InvalidPayload?"invalid_reviewer_payload":response.Status;
+            // A model that reports "error" in a valid payload is an unusable unit, not a provider failure that stops the pass.
+            string? code=valid?null:response.Status=="success"?response.Disposition:response.Status==WireAdapters.InvalidPayload?"invalid_reviewer_payload":
+                response.Status=="error"&&saved.HttpStatus<400?"model_reported_error":response.Status;
             unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw","synthetic",validation,response.Disposition,valid,CoreBytes(p,req),findings,code);
         }
         catch(ReviewError e){unit=Invalid(p,req,e.Code);}

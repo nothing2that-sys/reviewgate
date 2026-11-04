@@ -21,7 +21,7 @@ public static partial class SafePath
         Data.Require(Within(full, root), "path_outside_root");
         var relative = Path.GetRelativePath(Path.GetPathRoot(full)!, full);
         foreach (var component in relative.Split(Path.DirectorySeparatorChar))
-            Data.Require(!component.Contains(':') && !component.Contains('*') && !component.Contains('?') && !component.EndsWith(' ') && !component.EndsWith('.')
+            Data.Require(component.IndexOfAny([':', '*', '?', '<', '>', '"', '|']) < 0 && !component.EndsWith(' ') && !component.EndsWith('.')
                 && !Reserved().IsMatch(component), "invalid_path");
         NoLinks(full);
         return ActualCase(full);

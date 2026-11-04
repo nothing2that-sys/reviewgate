@@ -18,7 +18,7 @@ public sealed class RecoveryRegressionTests
         var first=await engine.ExecuteAsync(p,e.Grant(p)with{MaxRequests=1,MaxRetries=0});
         Assert.Equal(12,first.ExitCode);string run=first.Result.RunId!;Assert.Single(s.Attempts(run));
         var resumed=await engine.ExecuteAsync(p,e.Grant(p,run)with{MaxRetries=0},run);
-        Assert.Equal(20,resumed.ExitCode);Assert.Equal("partial",resumed.Result.Status);
+        Assert.Equal(12,resumed.ExitCode);Assert.Equal("partial",resumed.Result.Status);Assert.Equal("retry_limit_reached",resumed.Result.RunErrorCode);
         Assert.Single(s.Attempts(run),a=>a.RequestId==p.Requests[0].Id);Assert.Single(s.Attempts(run),a=>a.RequestId==p.Requests[1].Id);
         Assert.Equal("truncated",s.Units(run).Single(u=>u.RequestId==p.Requests[0].Id).ErrorCode);Assert.True(s.Units(run).Single(u=>u.RequestId==p.Requests[1].Id).Valid);
     }
@@ -33,6 +33,51 @@ public sealed class RecoveryRegressionTests
         Assert.Equal(0m,s.Costs(run.Id)["unknown_hold_usd"]!.GetValue<decimal>());
         Assert.Equal("input_changed",(await Assert.ThrowsAsync<ReviewError>(()=>new ReviewEngine(s).ExecuteAsync(p,g,run.Id))).Code);
     }
+    // Leaves one attempt with a committed response file that has not been settled yet (the response_saved checkpoint).
+    static (RunRow Run,AttemptRow Attempt) SavedButUnsettled(TestEnvironment e,StateStore s,Plan p,Grant g)
+    {
+        var run=s.NewRun(p);var a=s.Reserve(run,p,p.Requests[0],g);s.Dispatch(a.Id);
+        s.SaveResponse(a,new(a.Id,p.Requests[0].Id,p.Hash,ReviewGate.Providers.WireAdapters.WrapFixture(p.Reviewers[0],p.Fixture.Responses[0]),200));
+        Assert.Equal("response_saved",s.Attempts(run.Id).Single().Phase);return(run,a);
+    }
+    [Fact] public async Task RecoverOnlySettlesSavedResponseAfterOriginalWasEdited()
+    {
+        using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var (run,_)=SavedButUnsettled(e,s,p,e.Grant(p));
+        File.AppendAllText(Path.Combine(e.Source,"Sample.cs"),"// edited after the crash");
+        var r=await new ReviewEngine(s).ExecuteAsync(p,null,run.Id,true);
+        Assert.Equal(0,r.ExitCode);Assert.Equal("settled",s.Attempts(run.Id).Single().Phase);Assert.True(s.Units(run.Id).Single().Valid);
+        Assert.Equal(0m,s.Costs(run.Id)["reserved_usd"]!.GetValue<decimal>());Assert.Equal("partial",r.Result.Status);
+    }
+    [Fact] public async Task ExpiredGrantStillSettlesSavedResponseButBlocksNewDispatch()
+    {
+        using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var g=e.Grant(p);var (run,_)=SavedButUnsettled(e,s,p,g);
+        var r=await new ReviewEngine(s).ExecuteAsync(p,g with{Id=Data.Id("grant"),ExpiresAt=DateTimeOffset.UtcNow.AddSeconds(-1)},run.Id);
+        Assert.Equal("settled",s.Attempts(run.Id).Single().Phase);Assert.Single(s.Attempts(run.Id));
+        Assert.Equal(0,r.ExitCode);Assert.Equal("completed",r.Result.Status);
+    }
+    [Fact] public async Task ModelReportedErrorDoesNotStopTheRemainingRequests()
+    {
+        using var e=TwoChunks(new(Chunk:0,Status:"error",Usage:new(100,20)),new(Chunk:1,Usage:new(100,20)));
+        using var s=e.Store();var p=e.MakePlan(s);var r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p));
+        Assert.Equal(20,r.ExitCode);Assert.Equal(2,s.Attempts(r.Result.RunId).Count);
+        Assert.Equal("model_reported_error",s.Units(r.Result.RunId!).Single(u=>u.RequestId==p.Requests[0].Id).ErrorCode);
+    }
+    [Fact] public async Task SettledCostAboveReservationStopsFurtherDispatch()
+    {
+        using var e=TwoChunks(new FixtureResponse(Usage:new(50_000_000,0)));using var s=e.Store();var p=e.MakePlan(s);var r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p));
+        Assert.Equal(12,r.ExitCode);Assert.Equal("reservation_overrun",r.Result.RunErrorCode);var a=Assert.Single(s.Attempts(r.Result.RunId));Assert.True(a.CostUsd>a.ReservationUsd);
+    }
+#if DEBUG
+    [Fact] public async Task PriceValidityIsRecheckedAtDispatchIntent()
+    {
+        DateTimeOffset clock=new(2026,11,30,14,58,0,TimeSpan.Zero);using var e=new TestEnvironment();
+        e.Put("prices.json",new PriceSnapshot(Data.Version,"test",clock,clock.AddDays(-1),clock.AddMinutes(1),"synthetic",Data.Hash("test"),[new("fixture/a",1,2)]));
+        using var s=new StateStore(e.State,()=>clock);var p=e.MakePlan(s);
+        ReviewEngine.FaultObserver=stage=>{if(stage=="reserved")clock=clock.AddMinutes(2);};
+        CommandResult r;try{r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p)with{ExpiresAt=clock.AddHours(1)});}finally{ReviewEngine.FaultObserver=null;}
+        Assert.Equal(12,r.ExitCode);Assert.Equal("price_snapshot_expired",r.Result.RunErrorCode);Assert.Equal("released",s.Attempts().Single().Phase);
+    }
+#endif
     [Fact] public void ReservationCoversRequestBytesWhenDeclaredBoundIsTooSmall()
     {
         using var e=new TestEnvironment();e.Put("reviewer.json",e.Reviewer with{InputTokenUpperBound=1,MaxOutputTokens=1});using var s=e.Store();var p=e.MakePlan(s);var r=p.Requests.Single();
