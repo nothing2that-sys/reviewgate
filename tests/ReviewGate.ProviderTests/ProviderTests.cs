@@ -33,6 +33,17 @@ public sealed class ProviderTests
     [Theory][InlineData(401,"unauthorized")][InlineData(429,"rate_limited")][InlineData(503,"error")]
     public void HttpErrorsPreserveClassificationWithoutLeakingBody(int http,string expected)
     {var r=WireAdapters.Parse(Reviewer("openai"),"{\"error\":{\"message\":\"TEST_SECRET_SENTINEL\"}}",http);Assert.Equal(expected,r.Status);Assert.False(r.Usage.Known);Assert.DoesNotContain("TEST_SECRET_SENTINEL",Data.Json(r));}
+    // Hand-written wire bodies, not produced by WrapFixture, so serializer and parser cannot share one mistake here.
+    [Theory]
+    [InlineData("openai","{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"no\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}","refused")]
+    [InlineData("openai","{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}","truncated")]
+    [InlineData("together","{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"status\\\":\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}","truncated")]
+    [InlineData("google","{\"status\":\"incomplete\",\"steps\":[],\"usage\":{\"total_input_tokens\":3,\"total_output_tokens\":1,\"total_tokens\":4}}","truncated")]
+    [InlineData("together","{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"not json\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}","invalid_payload")]
+    public void IndependentWireBodiesKeepNonSuccessStatusAndUsage(string provider,string wire,string expected)
+    {var r=WireAdapters.Parse(Reviewer(provider),wire);Assert.Equal(expected,r.Status);Assert.Equal("not_reported",r.Disposition);Assert.True(r.Usage.Known);Assert.Equal(3,r.Usage.InputTokens);}
+    [Fact] public void ErrorBodyRedactionKeepsOnlyUsage()
+    {var redacted=WireAdapters.RedactErrorBody("{\"error\":{\"message\":\"TEST_SECRET_SENTINEL\"},\"usage\":{\"input_tokens\":1}}");Assert.DoesNotContain("TEST_SECRET_SENTINEL",redacted);Assert.Contains("input_tokens",redacted);}
     [Fact] public void GoogleUnexplainedUsageRemainsUnknown()
     {var r=Reviewer("google");var wire=JsonNode.Parse(WireAdapters.WrapFixture(r,new(Usage:new(100,20))))!;wire["usage"]!["total_tokens"]=130;Assert.False(WireAdapters.Parse(r,wire.ToJsonString()).Usage.Known);}
     [Fact] public void ReasoningIncludedOutputIsNotChargedTwice()

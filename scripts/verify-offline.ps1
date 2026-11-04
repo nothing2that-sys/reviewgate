@@ -13,7 +13,17 @@ try {
     $manifest = Get-Content -LiteralPath tests/test-manifest.json -Raw | ConvertFrom-Json
     $actual = @(Get-ChildItem tests -Recurse -Filter '*.csproj' | ForEach-Object { $_.BaseName } | Sort-Object)
     if (Compare-Object $actual @($manifest.suites | Sort-Object)) { throw 'Missing or unexpected test suite' }
+    # One results folder holds exactly one run; mixing TRX from separate runs is refused.
+    if ((Test-Path -LiteralPath $Results) -and @(Get-ChildItem -LiteralPath $Results -Force).Count -gt 0) { throw "Results folder must be new or empty: $Results" }
     New-Item -ItemType Directory -Force -Path $Results | Out-Null
+    $head = (& git rev-parse HEAD).Trim()
+    $dirty = @(& git status --porcelain=v1 --untracked-files=all) | Where-Object { $_ -and ($_ -notmatch [regex]::Escape($Results.Replace('\','/'))) }
+    $sdk = (& dotnet --version).Trim()
+    $started = [DateTimeOffset]::Now.ToString('o')
+    # File identity: git blob id (line-ending normalized as Git stores it) plus the exact worktree bytes that were built.
+    $paths = @(& git ls-files --cached --others --exclude-standard -- src tests schemas profiles scripts ReviewGate.sln global.json Directory.Build.props Directory.Build.targets NuGet.config) | Sort-Object -Unique
+    $files = foreach ($path in $paths) { if (Test-Path -LiteralPath $path -PathType Leaf) { [ordered]@{path=$path;bytes=(Get-Item -LiteralPath $path).Length;worktree_sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();git_blob_sha1=(& git hash-object -- $path).Trim()} } }
+    [ordered]@{schema_version='1.0';scope='local_integrity_reference_not_independent_trust_anchor';git_head=$head;worktree_dirty=($dirty.Count -gt 0);files=@($files)} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Results 'file-manifest.json') -Encoding utf8NoBOM
     & dotnet build ReviewGate.sln --no-restore -v quiet
     if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
     $rows = @()
@@ -25,7 +35,8 @@ try {
         if ([int]$c.total -le 0 -or [int]$c.passed -ne [int]$c.total -or [int]$c.executed -ne [int]$c.total) { throw "Empty, skipped or incomplete suite: $suite" }
         $rows += [ordered]@{suite=$suite;total=[int]$c.total;passed=[int]$c.passed;failed=[int]$c.failed;skipped=([int]$c.total-[int]$c.executed)}
     }
-    [ordered]@{schema_version='1.0';execution_mode='synthetic';suites=$rows;total=($rows.total | Measure-Object -Sum).Sum;actual_model_api_calls=0;credential_connections=0} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Results 'summary.json') -Encoding utf8NoBOM
+    # Network/credential absence is a structural claim backed by a test, not a measured call count.
+    [ordered]@{schema_version='1.0';execution_mode='synthetic';git_head=$head;worktree_dirty=($dirty.Count -gt 0);dotnet_sdk=$sdk;started_at=$started;finished_at=[DateTimeOffset]::Now.ToString('o');suites=$rows;total=[int]($rows.total | Measure-Object -Sum).Sum;network_and_credential_evidence='structural: OfflineE2E.ProductSourcesContainNoNetworkOrCredentialImplementation; not an OS egress measurement'} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Results 'summary.json') -Encoding utf8NoBOM
     & dotnet publish src/ReviewGate.Cli/ReviewGate.Cli.csproj -c Release --no-restore -o .work/publish -v quiet
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
     $temporary = Join-Path $repo ('.work/publish-smoke-'+[guid]::NewGuid().ToString('N'))
@@ -42,6 +53,6 @@ try {
         if (!$type -or $type.GetProperty('FaultObserver')) { throw 'Release fault seam exclusion failed' }
     }
     & ./scripts/offline-demo.ps1 -CliDll $dll | Set-Content -LiteralPath (Join-Path $Results 'publish-demo.json') -Encoding utf8NoBOM
-    [ordered]@{version=$version;live_exit=14;release_fault_seams='absent';temporary_publish_directory=$temporary;framework_dependent=$true;network_transport='absent';credential_implementation='absent'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Results 'publish-smoke.json') -Encoding utf8NoBOM
+    [ordered]@{git_head=$head;version=$version;live_exit=14;release_fault_seams='absent_by_reflection';temporary_publish_directory=$temporary;framework_dependent=$true;network_and_credential_evidence='not_measured_here_see_summary'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Results 'publish-smoke.json') -Encoding utf8NoBOM
 }
 finally { Pop-Location }

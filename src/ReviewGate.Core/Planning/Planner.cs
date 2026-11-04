@@ -30,6 +30,8 @@ public static class Planner
         foreach(var r in reviewers)WireAdapters.Validate(r);
         Data.Require(reviewers.Select(r=>r.Id).Distinct().Count()==reviewers.Count,"duplicate_reviewer_id");
         Data.Require(reviewers.Select(r=>r.CanonicalModelKey).Distinct().Count()==reviewers.Count,"duplicate_reviewer_model");
+        // The declared key is not a verified identity: the same model id/version under another key or host is the same model.
+        Data.Require(reviewers.Select(ModelIdentity).Distinct().Count()==reviewers.Count,"duplicate_reviewer_model");
         var budget=Data.Read<BudgetPolicy>(input.BudgetFile);Data.VersionIs(budget.SchemaVersion);
         Data.Require(budget.Currency=="USD"&&budget.Timezone=="+09:00"&&budget.RunUsd>0&&budget.ProjectUsd>0&&budget.MonthUsd>0&&budget.MaxRequests>0&&budget.MaxRetries>=0,"invalid_budget");
         var prices=Data.Read<PriceSnapshot>(input.PriceFile);Data.VersionIs(prices.SchemaVersion);
@@ -45,15 +47,17 @@ public static class Planner
         {
             Data.Require(input.BaseRun is not null&&input.Findings is {Count:>0},"verification_target_required");
             var prior=store.GetRun(input.BaseRun);Data.Require(!store.OwnerAlive(prior.ProjectId),"owner_conflict",13);
+            Data.Require(prior.ProjectId==input.Project,"verification_project_mismatch");
+            Data.Require(prior.Status is "completed" or "partial","verification_base_not_stable",13);
             selectedFindings=store.Units(prior.Id).SelectMany(u=>u.Findings).Where(f=>input.Findings.Contains(f.Id)).ToList();
             Data.Require(selectedFindings.Count==input.Findings.Distinct().Count(),"unknown_verification_finding");
         }
         else Data.Require(input.BaseRun is null&&input.Findings is not {Count:>0},"unexpected_verification_target");
         var directoryPins=input.Inputs.Concat(input.References).Select(x=>SafePath.Input(x,root)).Where(Directory.Exists).Select(x=>new InputPin(x,SourceReader.InventoryHash(x))).ToList();
         string id=Data.Id("plan");var capture=SourceReader.Capture(root,repo,input.Inputs,input.References,store.NewSnapshotDir(id),profile.ChunkBytes,profile.ContextBytes);
-        foreach(var s in capture.Sources.Where(s=>Path.GetExtension(s.OriginalPath) is ".diff" or ".patch"))
+        foreach(var s in capture.Sources.Where(s=>IsDiff(s.OriginalPath)))
             Data.CreateFile(Path.Combine(Path.GetDirectoryName(s.RawPath)!,s.Id+".diff-map.json"),Data.Json(UnifiedDiff.Parse(File.ReadAllText(s.TextPath))));
-        var sources=capture.Sources.Select(s=>s with{ExportPath=Path.GetExtension(s.OriginalPath) is ".diff" or ".patch"?null:s.ExportPath}).ToList();
+        var sources=capture.Sources.Select(s=>s with{ExportPath=IsDiff(s.OriginalPath)?null:s.ExportPath}).ToList();
         if(input.Mode=="verify")Data.Require(selectedFindings.All(f=>sources.Any(s=>s.Id==f.SourceId)),"verification_snapshot_mismatch",13);
         var p=new Plan{Id=id,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
             InstructionHash=Data.Hash(input.Instruction),Profile=profile,Reviewers=reviewers,Budget=budget,Prices=prices,Fixture=fixture,
@@ -74,13 +78,19 @@ public static class Planner
                     string payload=Data.Json(new{execution_mode="synthetic",instruction=input.Instruction,criterion,core=new{source_id=chunk.SourceId,start_byte=chunk.Start,end_byte=chunk.End},sources=context,
                         verification_target=input.Mode=="verify"?selectedFindings:null});
                     string body=WireAdapters.Build(reviewer,payload);string unit=Data.Hash(reviewer.Id+"\n"+criterion.Id+"\n"+chunk.Id);
-                    var request=new RequestPlan(Data.Id("request"),unit,reviewer.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,body,Data.Hash(body),WireAdapters.Reservation(reviewer,price),criterion.Scope);
+                    var request=new RequestPlan(Data.Id("request"),unit,reviewer.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,body,Data.Hash(body),WireAdapters.Reservation(reviewer,price,body),criterion.Scope);
                     _=SelectFixture(p,request);p.Requests.Add(request);
                 }
             }
         }
         Data.Require(p.Requests.Count>0,"no_reviewable_units");
         p.ManifestHash=Data.Hash(Data.Json(p.Requests));CheckPins(p);p.Hash=Data.Hash(Data.Json(p with{Hash=""}));store.SavePlan(p);return p;
+    }
+    public static bool IsDiff(string path)=>Path.GetExtension(path).ToLowerInvariant() is ".diff" or ".patch";
+    public static string ModelIdentity(ReviewerProfile r)
+    {
+        string model=r.ModelId.Trim().ToLowerInvariant();
+        return model[(model.LastIndexOf('/')+1)..]+"@"+r.ModelVersion.Trim().ToLowerInvariant();
     }
     public static FixtureResponse SelectFixture(Plan p,RequestPlan request)
     {

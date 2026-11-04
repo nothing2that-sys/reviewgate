@@ -36,5 +36,10 @@ public sealed class HglosTests
     [Fact] public async Task SuggestionsAndMissingRepositoryCoordinatesAreExplicitExclusions()
     {
         using var e=new TestEnvironment(responses:[new(Disposition:"finding",Findings:[new("Improve name","Reason","result",Kind:"suggestion",Assumptions:[])],Usage:new(100,20))]);using var s=e.Store();var p=e.MakePlan(s);var engine=new ReviewEngine(s);var r=await engine.ExecuteAsync(p,e.Grant(p));Assert.Equal(0,r.ExitCode);Assert.Equal(20,engine.Export(r.Result.RunId!,"hglos-findings",false).ExitCode);
+        // A defect without a declared repository root has no repository coordinate and must be excluded, not guessed.
+        e.Put("fixture.json",new FixtureBundle(Data.Version,"defect",[new(Disposition:"finding",Findings:[new("Wrong value","Reason","result",Assumptions:[])],Usage:new(100,20))]));
+        var noRepo=ReviewGate.Core.Planning.Planner.Build(s,new("test",e.Source,null,"synthetic","Review",e.File("profile.json"),[e.File("reviewer.json")],e.File("budget.json"),e.File("prices.json"),e.File("fixture.json"),["Sample.cs"],[]));
+        var run=await engine.ExecuteAsync(noRepo,e.Grant(noRepo));Assert.Equal(0,run.ExitCode);var export=engine.Export(run.Result.RunId!,"hglos-findings",true);Assert.Equal(20,export.ExitCode);
+        Assert.Contains("after_source_coordinate_required",File.ReadAllText(Path.Combine(s.Root,export.Result.Artifacts.Single(a=>a.Path.EndsWith("provenance.json",StringComparison.Ordinal)).Path)));
     }
 }

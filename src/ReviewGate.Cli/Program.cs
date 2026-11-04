@@ -15,5 +15,7 @@ if (result.OutputPath is string output)
     catch (Exception e) when (e is IOException or UnauthorizedAccessException or ReviewError)
     { result = new(21, result.Result with { ErrorCode = "output_write_failed", RequiredAction = "inspect_run_with_status" }); }
 }
-Console.WriteLine(Data.Json(result.Result));
+// A failed stdout delivery is reported as an output failure; the saved bundle stays readable via status.
+try { Console.WriteLine(Data.Json(result.Result)); Console.Out.Flush(); }
+catch (IOException) { return 21; }
 return result.ExitCode;

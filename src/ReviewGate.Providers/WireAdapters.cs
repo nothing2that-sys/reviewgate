@@ -12,6 +12,8 @@ public static class WireAdapters
     {
         Data.VersionIs(r.SchemaVersion);
         Data.Require(!string.IsNullOrWhiteSpace(r.Id)&&!string.IsNullOrWhiteSpace(r.ModelId)&&!string.IsNullOrWhiteSpace(r.CanonicalModelKey),"invalid_reviewer");
+        // Lower-case, whitespace-free keys stop case or spacing variants from posing as distinct models.
+        Data.Require(System.Text.RegularExpressions.Regex.IsMatch(r.CanonicalModelKey,"^[a-z0-9][a-z0-9._/:@-]{0,127}$"),"invalid_canonical_model_key");
         Data.Require((r.HostingProvider,r.ApiProfile) is ("openai","responses") or ("together","chat_completions") or ("google","interactions"),"unsupported_capability",14);
         Data.Require(r.InputTokenUpperBound>0&&r.MaxOutputTokens>0&&r.MaxReasoningTokens>=0&&r.MaxRequestBytes>0,"unbounded_request",12);
     }
@@ -84,11 +86,17 @@ public static class WireAdapters
                     {if(c?["type"]?.GetValue<string>()=="text")text+=c["text"]?.GetValue<string>();else if(c?["type"]?.GetValue<string>()=="refusal")status="refused";}
             }
             if(status!="success")return new(status,"not_reported",[],usage);
-            var p=Data.Parse<Payload>(text);
-            Data.Require(p.Status is "success" or "refused" or "truncated" or "error"&&p.Findings is not null,"invalid_reviewer_payload",21);
-            Data.Require(p.Disposition is "finding" or "no_finding" or "cannot_assess" or "not_reported","invalid_reviewer_disposition",21);
-            Data.Require((p.Disposition=="finding")== (p.Findings.Count>0),"inconsistent_findings",21);
-            return new(p.Status,p.Disposition,p.Findings,usage);
+            // The provider envelope (and its usage) is valid here; a model payload that breaks the
+            // reviewer contract is an invalid result with known usage, not an unknown dispatch.
+            try
+            {
+                var p=Data.Parse<Payload>(text);
+                Data.Require(p.Status is "success" or "refused" or "truncated" or "error"&&p.Findings is not null,"invalid_reviewer_payload",21);
+                Data.Require(p.Disposition is "finding" or "no_finding" or "cannot_assess" or "not_reported","invalid_reviewer_disposition",21);
+                Data.Require((p.Disposition=="finding")== (p.Findings.Count>0),"inconsistent_findings",21);
+                return new(p.Status,p.Disposition,p.Findings,usage);
+            }
+            catch(ReviewError){return new(InvalidPayload,"not_reported",[],usage);}
         }
         catch(Exception e)when(e is JsonException or InvalidOperationException or FormatException or IndexOutOfRangeException or KeyNotFoundException)
         {throw new ReviewError(21,"invalid_provider_shape");}
@@ -115,7 +123,19 @@ public static class WireAdapters
         return ((u.InputTokens-u.CachedInputTokens)*p.InputPerMillion+u.CachedInputTokens*p.CachedInputPerMillion
             +u.OutputTokens*p.OutputPerMillion+(p.OutputIncludesReasoning?0:u.ReasoningTokens*p.ReasoningPerMillion))/1_000_000m;
     }
-    public static decimal Reservation(ReviewerProfile r,PriceRow p)=>((decimal)r.InputTokenUpperBound*Math.Max(p.InputPerMillion,p.CachedInputPerMillion)
+    public const string InvalidPayload="invalid_payload";
+    // Assumed per-request framing tokens beyond the serialized body (synthetic assumption, not a provider guarantee).
+    public const int FramingTokenAllowance=256;
+    // A declared token bound alone is not proof: with a byte-level tokenizer, input tokens cannot exceed
+    // the body's UTF-8 bytes plus framing, so the reservation uses the larger of the two bounds.
+    public static long InputTokenBound(ReviewerProfile r,string body)=>Math.Max(r.InputTokenUpperBound,(long)Data.Utf8.GetByteCount(body)+FramingTokenAllowance);
+    public static decimal Reservation(ReviewerProfile r,PriceRow p,string body)=>((decimal)InputTokenBound(r,body)*Math.Max(p.InputPerMillion,p.CachedInputPerMillion)
         +(decimal)r.MaxOutputTokens*p.OutputPerMillion+(p.OutputIncludesReasoning?0:(decimal)r.MaxReasoningTokens*p.ReasoningPerMillion))/1_000_000m;
+    // Error bodies may echo account or key fragments; only the usage envelope is retained.
+    public static string RedactErrorBody(string json)
+    {
+        try{var root=JsonNode.Parse(json) as JsonObject;return new JsonObject{["usage"]=root?["usage"]?.DeepClone(),["redacted"]=true}.ToJsonString();}
+        catch(JsonException){return new JsonObject{["redacted"]=true}.ToJsonString();}
+    }
     record Payload(string Status,string Disposition,List<FixtureFinding> Findings);
 }

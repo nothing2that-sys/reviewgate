@@ -100,16 +100,30 @@ public sealed class StateStore : IDisposable
         Data.Require(g.ExpiresAt>time,"grant_expired",10);
         Data.Require(g.MaxUsd>0&&g.MaxRequests>0&&g.MaxRetries>=0,"invalid_grant",10);
     }
-    public AttemptRow Reserve(RunRow run,Plan plan,RequestPlan request,Grant grant)
+    // Binds the grant to the run in the run's first preparation, even when no reservation follows.
+    public void BindGrant(RunRow run,Plan plan,Grant grant)
     {
         CheckGrant(grant,plan,run,Now);
-        Data.Require(Now>=plan.Prices.EffectiveFrom&&Now<plan.Prices.EffectiveTo,"price_snapshot_expired",12);
-        using var tx=db.BeginTransaction();
+        using var tx=db.BeginTransaction();BindGrant(run,grant,tx);tx.Commit();
+    }
+    void BindGrant(RunRow run,Grant grant,SqliteTransaction tx)
+    {
         Data.Require(Scalar("SELECT id FROM grant_revocations WHERE id=$i",tx,("$i",grant.Id)) is null,"grant_revoked",10);
         string? bound=Scalar("SELECT run_id FROM grants WHERE id=$g",tx,("$g",grant.Id));
         string hash=Data.Hash(Data.Json(grant));
         if(bound is not null)Data.Require(bound==run.Id&&Scalar("SELECT hash FROM grants WHERE id=$g",tx,("$g",grant.Id))==hash,"grant_already_bound_or_changed",10);
         else Exec("INSERT INTO grants VALUES($g,$r,$h,$j)",tx,("$g",grant.Id),("$r",run.Id),("$h",hash),("$j",Data.Json(grant)));
+    }
+    public bool RetryExhausted(RunRow run,Plan plan,RequestPlan request,Grant grant)
+        =>Attempts(run.Id).Count(a=>a.RequestId==request.Id&&a.Phase!="released")>Math.Min(grant.MaxRetries,plan.Budget.MaxRetries);
+    public void RecordUnit(string runId,UnitResult unit)
+        =>Exec("INSERT OR IGNORE INTO units VALUES($r,$u,$j)",null,("$r",runId),("$u",unit.UnitId),("$j",Data.Json(unit)));
+    public AttemptRow Reserve(RunRow run,Plan plan,RequestPlan request,Grant grant)
+    {
+        CheckGrant(grant,plan,run,Now);
+        Data.Require(Now>=plan.Prices.EffectiveFrom&&Now<plan.Prices.EffectiveTo,"price_snapshot_expired",12);
+        using var tx=db.BeginTransaction();
+        BindGrant(run,grant,tx);
         string monthly=plan.Budget.MonthUsd.ToString(CultureInfo.InvariantCulture);
         string? monthCap=Scalar("SELECT value FROM meta WHERE key='month_cap'",tx);
         Data.Require(monthCap is null||monthCap==monthly,"budget_policy_conflict",13);
@@ -118,7 +132,7 @@ public sealed class StateStore : IDisposable
         var runAttempts=all.Where(a=>a.RunId==run.Id&&a.Phase!="released").ToList();
         var grantAttempts=all.Where(a=>a.GrantId==grant.Id&&a.Phase!="released").ToList();
         int retries=runAttempts.Count(a=>a.RequestId==request.Id);
-        Data.Require(retries<=Math.Min(grant.MaxRetries,plan.Budget.MaxRetries),"retry_limit_reached",21);
+        Data.Require(retries<=Math.Min(grant.MaxRetries,plan.Budget.MaxRetries),"retry_limit_reached",12);
         Data.Require(runAttempts.Count<plan.Budget.MaxRequests&&grantAttempts.Count<grant.MaxRequests,"request_limit_reached",12);
         var projectRuns=RunIdsForProject(plan.ProjectId,tx);
         Data.Require(all.Where(a=>projectRuns.Contains(a.RunId)).Sum(Held)+amount<=plan.Budget.ProjectUsd
@@ -128,7 +142,8 @@ public sealed class StateStore : IDisposable
         Exec("INSERT INTO attempts VALUES($i,$r,$q,$g,'reserved',$a,NULL,$m,NULL,NULL,NULL)",tx,("$i",row.Id),("$r",row.RunId),("$q",row.RequestId),("$g",row.GrantId),("$a",Money(amount)),("$m",month));
         Event(row.Id,"reserve",amount,"synthetic_bound",tx);tx.Commit();return row;
     }
-    public void Dispatch(string id)=>Exec("UPDATE attempts SET phase='dispatch_intent' WHERE id=$i AND phase='reserved'",null,("$i",id));
+    // Cost month is attributed to the dispatch intent time, not the reservation time.
+    public void Dispatch(string id)=>Data.Require(Exec("UPDATE attempts SET phase='dispatch_intent',month=$m WHERE id=$i AND phase='reserved'",null,("$i",id),("$m",Month(Now)))==1,"invalid_request_transition",13);
     public void RevokeGrant(string id){ValidId(id);Exec("INSERT OR IGNORE INTO grant_revocations VALUES($i,$t)",null,("$i",id),("$t",Now.ToString("O")));}
     public void EnsureGrantActive(string id)=>Data.Require(Scalar("SELECT id FROM grant_revocations WHERE id=$i",null,("$i",id)) is null,"grant_revoked",10);
     public string ResponseFile(AttemptRow a)=>PathFor("runs",a.RunId,a.Id+".response.json");
@@ -204,7 +219,8 @@ public sealed class StateStore : IDisposable
                 Data.Require(value==calculated,"resolution_cost_mismatch",13);
             }
             Data.Require(value>=0,"invalid_resolution");
-            Exec("UPDATE attempts SET phase='settled',cost=$c,error=$e WHERE id=$i",tx,("$c",Money(value)),("$e","resolved_"+item.Outcome),("$i",a!.Id));
+            // Proven non-dispatch is equivalent to a released reservation: it consumes no request or retry.
+            Exec("UPDATE attempts SET phase=$p,cost=$c,error=$e WHERE id=$i",tx,("$p",item.Outcome=="not_sent"?"released":"settled"),("$c",Money(value)),("$e","resolved_"+item.Outcome),("$i",a!.Id));
             Event(a.Id,"unknown_resolved",value,Data.Json(item),tx);
         }
         tx.Commit();
@@ -224,7 +240,7 @@ public sealed class StateStore : IDisposable
     static string Money(decimal value)=>value.ToString(CultureInfo.InvariantCulture);
     SqliteCommand Cmd(string sql,SqliteTransaction? tx=null,params (string,object?)[] args)
     {var c=db.CreateCommand();c.CommandText=sql;c.Transaction=tx;foreach(var (key,value)in args)c.Parameters.AddWithValue(key,value??DBNull.Value);return c;}
-    void Exec(string sql,SqliteTransaction? tx=null,params (string,object?)[] args){using var c=Cmd(sql,tx,args);c.ExecuteNonQuery();}
+    int Exec(string sql,SqliteTransaction? tx=null,params (string,object?)[] args){using var c=Cmd(sql,tx,args);return c.ExecuteNonQuery();}
     string? Scalar(string sql,SqliteTransaction? tx=null,params (string,object?)[] args){using var c=Cmd(sql,tx,args);var v=c.ExecuteScalar();return v is null or DBNull?null:Convert.ToString(v,CultureInfo.InvariantCulture);}
     public void Dispose()=>db.Dispose();
 #if DEBUG

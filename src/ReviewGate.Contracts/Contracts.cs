@@ -147,7 +147,8 @@ public record Finding(string Id, string RequestId, string ReviewerId, string Cri
     string Kind, string Category, string Severity, string Claim, string Detail, string Quote,
     string ReportedEvidenceGrade, List<string> Assumptions, string ExportedEvidenceGrade,
     bool QuoteValid, bool LocationValid, string Confidence, string Suggestion, string Impact,
-    List<string> RelatedFindingIds);
+    List<string> RelatedFindingIds, string CoordinateSystem = "text", int? DiffBeforeLine = null,
+    int? DiffAfterLine = null, string? DiffOldPath = null, string? DiffNewPath = null);
 public record UnitResult(string UnitId, string RequestId, string ReviewerId, string CriterionId,
     string SourceId, string Stage, string Exposure, string TransportState, string ValidationState,
     string ReviewDisposition, bool Valid, int CoreBytes, List<Finding> Findings, string? ErrorCode);
@@ -157,9 +158,11 @@ public record RunRow(string Id, string PlanId, string ProjectId, string Status, 
 public record AttemptRow(string Id, string RunId, string RequestId, string GrantId, string Phase,
     decimal ReservationUsd, decimal? CostUsd, string Month, string? ResponsePath, string? ResponseHash,
     string? ErrorCode);
+public record PairCoverage(string CriterionId, string ReviewerId, string Stage, int RequiredUnits, int ValidUnits,
+    long TotalCoreBytes, long ValidCoreBytes, decimal? SyntheticProcessingRatio, decimal? ActualModelProcessingRatio);
 public record Coverage(int RequiredUnits, int ValidUnits, long TotalCoreBytes, long ValidCoreBytes,
     decimal? SyntheticProcessingRatio, decimal? ActualModelProcessingRatio, bool RequiredCoverageComplete,
-    List<string> MissingUnitIds);
+    List<string> MissingUnitIds, List<PairCoverage> ByCriterionReviewer, List<string> EmptySourceIds);
 public record Artifact(string Path, string Sha256, long Bytes, string Kind);
 public sealed record Envelope
 {

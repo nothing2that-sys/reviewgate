@@ -50,7 +50,10 @@ public static class HglosExporter
         var excluded=new List<object>();var mapped=new List<object>();var mappings=new List<object>();
         foreach(var f in units.SelectMany(u=>u.Findings))
         {
-            string? reason=f.Kind!="defect"?"not_code_defect":!f.QuoteValid||!f.LocationValid?"invalid_evidence":f.ExportPath is null||f.Line is null||f.Line<1?"after_source_coordinate_required":
+            var source=plan.Sources.SingleOrDefault(s=>s.Id==f.SourceId);
+            string? reason=f.Kind!="defect"?"not_code_defect":!f.QuoteValid||!f.LocationValid?"invalid_evidence":
+                source?.Role!="target"?"reference_source_not_review_target":f.CoordinateSystem!="text"?"diff_coordinate_not_after_source":
+                f.ExportPath is null||f.Line is null||f.Line<1?"after_source_coordinate_required":
                 !Categories.Contains(f.Category)||!Severities.Contains(f.Severity)?"unsupported_enum":null;
             if(reason is not null){excluded.Add(new{finding_id=f.Id,reason});continue;}
             mapped.Add(new{path=f.ExportPath,line=f.Line,category=f.Category,severity=f.Severity,evidence=f.ExportedEvidenceGrade,claim=f.Claim,detail=f.Detail});
@@ -65,7 +68,9 @@ public static class HglosExporter
         var env=new Envelope{Command="export",RunId=run.Id,PlanId=plan.Id,Status=complete?"completed":"partial",ErrorCode=error,Coverage=coverage,StaleSourceIds=stale};
         if(!complete&&!allowPartial)return new(exit,env);
         var files=new Dictionary<string,string>();
-        if(complete||coverage.ValidUnits>0)files["hglos.findings.synthetic.json"]=Data.Json(new{findings=mapped});
+        // A partial subset uses its own file name so it cannot be mistaken for a complete raw export.
+        if(complete)files[CompleteRawName]=Data.Json(new{findings=mapped});
+        else if(coverage.ValidUnits>0)files[PartialRawName]=Data.Json(new{findings=mapped});
         files["provenance.json"]=Data.Json(new{schema_version=Data.Version,execution_mode="synthetic",run_id=run.Id,plan_id=plan.Id,plan_hash=plan.Hash,manifest_hash=plan.ManifestHash,
             run_status=run.Status,stale_source_ids=stale,applies_to="pinned_snapshot_only",required_coverage_complete=coverage.RequiredCoverageComplete,projection_complete=excluded.Count==0,
             unresolved_attempts=attempts.Where(a=>StateHeld(a.Phase)).Select(a=>a.Id),coverage,excluded,mappings,
@@ -74,9 +79,11 @@ public static class HglosExporter
         var artifacts=BundleWriter.Write(root,directory,files);BundleWriter.Verify(root,artifacts);
         return new(exit,env with{Artifacts=artifacts});
     }
+    public const string CompleteRawName="hglos.findings.synthetic.json",PartialRawName="hglos.findings.partial.synthetic.json";
     static bool StateHeld(string s)=>s is "unknown" or "reserved" or "dispatch_intent" or "response_saved";
     public static object Independence(Plan p)=>new{input_isolation=p.Mode=="independent",distinct_reviewer=p.Reviewers.Count==2&&p.Reviewers.Select(r=>r.Id).Distinct().Count()==2,
         distinct_model=p.Reviewers.Count==2&&p.Reviewers.Select(r=>r.CanonicalModelKey).Distinct().Count()==2,
-        distinct_developer=p.Reviewers.Count!=2||(p.Reviewers.Any(r=>r.ModelDeveloper=="unknown"))?(bool?)null:p.Reviewers.Select(r=>r.ModelDeveloper).Distinct().Count()==2,
+        distinct_developer=p.Reviewers.Count!=2||(p.Reviewers.Any(r=>r.ModelDeveloper.Trim().Equals("unknown",StringComparison.OrdinalIgnoreCase)))?(bool?)null:p.Reviewers.Select(r=>r.ModelDeveloper.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count()==2,
+        canonical_model_key_source="declared_reviewer_file_not_verified_registry",
         evaluation_scope="synthetic_fixture",shared_fixture_id=p.Fixture.Id};
 }

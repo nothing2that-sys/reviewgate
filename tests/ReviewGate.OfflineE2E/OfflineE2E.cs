@@ -54,6 +54,8 @@ public sealed class OfflineE2E
         using var s=e.Store();var p=e.MakePlan(s);e.Put("grant.json",e.Grant(p));
         var result=await TestEnvironment.Invoke(["exec","--state-root",e.State,"--plan",p.Id,"--grant-file",e.File("grant.json")]);Assert.Equal(13,result.Exit);Assert.DoesNotContain(sentinel,result.Stdout+result.Stderr);
         var r=Data.Parse<Envelope>(result.Stdout);foreach(var a in r.Artifacts)Assert.DoesNotContain(sentinel,File.ReadAllText(Path.Combine(s.Root,a.Path)));
+        var responses=Directory.GetFiles(Path.Combine(s.Root,"runs"),"*.response.json",SearchOption.AllDirectories);Assert.Single(responses);
+        Assert.All(responses,file=>Assert.DoesNotContain(sentinel,File.ReadAllText(file)));
     }
     [Fact] public async Task SimultaneousReservationsRespectSharedMonthlyCap()
     {
@@ -63,7 +65,7 @@ public sealed class OfflineE2E
         async Task<int> Reserve(Plan p,RunRow r){await gate.Task;return await Task.Run(()=>{using var s=e.Store();try{s.Reserve(r,p,p.Requests[0],e.Grant(p));return 0;}catch(ReviewError ex){return ex.ExitCode;}});}
         var a=Reserve(p1,r1);var b=Reserve(p2,r2);gate.SetResult();var results=await Task.WhenAll(a,b);Assert.Equal(1,results.Count(x=>x==0));Assert.Equal(1,results.Count(x=>x==12));using var store=e.Store();Assert.Single(store.Attempts());
     }
-    [Fact] public void ProductionAssembliesContainNoNetworkOrCredentialImplementation()
+    [Fact] public void ProductSourcesContainNoNetworkOrCredentialImplementation()
     {
         // This suite fails on accidental addition of the forbidden production edges. CLI only uses the OS path to its state directory.
         string[] forbidden=["HttpClient", "WebRequest", "Socket(", "CredentialManager", "PasswordVault", "OPENAI_API_KEY", "TOGETHER_API_KEY", "GOOGLE_API_KEY", "Process.Start", "GetEnvironmentVariable"];

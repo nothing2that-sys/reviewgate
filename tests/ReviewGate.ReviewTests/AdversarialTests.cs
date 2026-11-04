@@ -29,7 +29,7 @@ public sealed class AdversarialTests
     }
     [Fact] public void EmptySourceIsNotReportedAsFullCoverage()
     {using var e=new TestEnvironment("");using var s=e.Store();Assert.Equal("no_reviewable_content",Assert.Throws<ReviewError>(()=>e.MakePlan(s)).Code);}
-    [Fact] public async Task ExpiredGrantAndChangedGrantNeverDispatch()
+    [Fact] public async Task ExpiredGrantNeverDispatches()
     {using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p)with{ExpiresAt=DateTimeOffset.UtcNow.AddSeconds(-1)});Assert.Equal(10,r.ExitCode);Assert.Empty(s.Attempts());}
     [Fact] public async Task ArtifactLossMakesStatusFailInsteadOfClaimingCompleted()
     {using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var engine=new ReviewEngine(s);var r=await engine.ExecuteAsync(p,e.Grant(p));File.Delete(Path.Combine(s.Root,r.Result.Artifacts[0].Path));Assert.Equal(13,Assert.Throws<ReviewError>(()=>engine.View(r.Result.RunId!)).ExitCode);}

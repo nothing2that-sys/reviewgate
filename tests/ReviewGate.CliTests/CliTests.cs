@@ -19,6 +19,12 @@ public sealed class CliTests
         var exported=await TestEnvironment.Invoke(e.Control("export",result.RunId!,"--format","hglos-findings"));Assert.Equal(0,exported.Exit);
         Assert.Equal("int result = 1;\n",File.ReadAllText(Path.Combine(e.Source,"Sample.cs")));
     }
+    [Fact] public async Task ValidatedOutputAlsoReceivesErrorEnvelope()
+    {
+        using var e=new TestEnvironment();using(var s=e.Store()){var p=e.MakePlan(s);e.Put("grant.json",e.Grant(p));File.AppendAllText(Path.Combine(e.Source,"Sample.cs"),"changed");
+        string output=e.File("error.json");var r=await TestEnvironment.Invoke(["exec","--state-root",e.State,"--plan",p.Id,"--grant-file",e.File("grant.json"),"--output",output]);
+        Assert.Equal(13,r.Exit);Assert.Equal(r.Stdout.Trim(),File.ReadAllText(output));Assert.Equal("snapshot_changed_or_missing",Data.Parse<Envelope>(File.ReadAllText(output)).ErrorCode);}
+    }
     [Fact] public async Task OutputCannotWriteSourceEvenOnFailure()
     {
         using var e=new TestEnvironment();string file=Path.Combine(e.Source,"new.json");

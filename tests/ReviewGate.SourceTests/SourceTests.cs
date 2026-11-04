@@ -39,6 +39,25 @@ public sealed class SourceTests : IDisposable
         var lines=UnifiedDiff.Parse("--- a/a.cs\n+++ b/a.cs\n@@ -5,2 +5,2 @@\n-old\n+new\n same\n");
         Assert.Null(lines[0].AfterLine);Assert.Equal(5,lines[1].AfterLine);Assert.Equal(6,lines[2].BeforeLine);
     }
+    [Fact] public void DiffHunkContentThatLooksLikeHeadersOrBlankContextIsParsed()
+    {
+        var lines=UnifiedDiff.Parse("--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++ new comment\n same\n");
+        Assert.Equal(3,lines.Count);Assert.Equal("-- old comment",lines[0].Text);Assert.Null(lines[0].AfterLine);Assert.Equal("++ new comment",lines[1].Text);Assert.Equal("q.sql",lines[1].NewPath);
+        var blank=UnifiedDiff.Parse("--- a/a.cs\n+++ b/a.cs\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n-- \n2.45.0\n");
+        Assert.Equal(2,blank[1].BeforeLine);Assert.Equal("",blank[1].Text);Assert.Equal(3,blank[3].AfterLine);
+    }
+    [Fact] public void DirectoryTraversalExcludesUnsupportedFilesButExplicitFileIsRejected()
+    {
+        Directory.CreateDirectory(Path.Combine(root,"src"));File.WriteAllText(Path.Combine(root,"src","A.cs"),"int a;");File.WriteAllText(Path.Combine(root,"src","App.csproj"),"<Project/>");File.WriteAllText(Path.Combine(root,"src","LICENSE"),"text");
+        var c=SourceReader.Capture(root,null,["src"],[],Path.Combine(root,"snap"),8,0);
+        Assert.Equal("src/A.cs",Assert.Single(c.Sources).LogicalPath);Assert.Equal(2,c.Exclusions.Count(x=>x.Reason=="unsupported_format"));
+        Assert.Equal("unsupported_input_format",Assert.Throws<ReviewError>(()=>SourceReader.Capture(root,null,["src/App.csproj"],[],Path.Combine(root,"snap2"),8,0)).Code);
+    }
+    [Fact] public void ExplicitInputKeepsOnDiskCase()
+    {
+        File.WriteAllText(Path.Combine(root,"Mixed.Case.txt"),"x");
+        Assert.Equal("Mixed.Case.txt",Assert.Single(SourceReader.Capture(root,null,["mixed.case.TXT"],[],Path.Combine(root,"snap"),8,0).Sources).LogicalPath);
+    }
     [Fact] public void DiffCountsAndBinaryAreValidated()
     {
         Assert.Throws<ReviewError>(()=>UnifiedDiff.Parse("--- a/a.cs\n+++ b/a.cs\n@@ -1,2 +1,2 @@\n one\n"));

@@ -21,10 +21,23 @@ public static partial class SafePath
         Data.Require(Within(full, root), "path_outside_root");
         var relative = Path.GetRelativePath(Path.GetPathRoot(full)!, full);
         foreach (var component in relative.Split(Path.DirectorySeparatorChar))
-            Data.Require(!component.Contains(':') && !component.EndsWith(' ') && !component.EndsWith('.')
+            Data.Require(!component.Contains(':') && !component.Contains('*') && !component.Contains('?') && !component.EndsWith(' ') && !component.EndsWith('.')
                 && !Reserved().IsMatch(component), "invalid_path");
         NoLinks(full);
-        return full;
+        return ActualCase(full);
+    }
+    // Returns the path with each existing component spelled as the directory entry is stored,
+    // so logical and repository paths keep the on-disk case rather than the typed case.
+    public static string ActualCase(string full)
+    {
+        string root = Path.GetPathRoot(full)!, current = root;
+        foreach (var component in Path.GetRelativePath(root, full).Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (component == ".") continue;
+            string? entry = Directory.Exists(current) ? Directory.EnumerateFileSystemEntries(current, component).FirstOrDefault() : null;
+            current = entry ?? Path.Combine(current, component);
+        }
+        return current;
     }
     [GeneratedRegex(@"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", RegexOptions.IgnoreCase)]
     private static partial Regex Reserved();
@@ -61,7 +74,7 @@ public static class SourceReader
         Data.Require(chunkBytes >= 4 && chunkBytes <= 1_048_576 && contextBytes >= 0 && contextBytes <= chunkBytes, "invalid_chunk_settings");
         var candidates = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var exclusions = new List<Exclusion>();
-        void Add(string path, string role)
+        void Add(string path, string role, bool fromDirectory = false)
         {
             string full = SafePath.Input(path, root);
             if (Directory.Exists(full))
@@ -72,7 +85,7 @@ public static class SourceReader
                     var attrs = File.GetAttributes(item);
                     if ((attrs & FileAttributes.ReparsePoint) != 0) { exclusions.Add(new(rel,"reparse_point")); continue; }
                     if (ExcludedDirs.Contains(Path.GetFileName(item))) { exclusions.Add(new(rel,"generated_or_metadata")); continue; }
-                    Add(item, role);
+                    Add(item, role, true);
                 }
                 return;
             }
@@ -81,7 +94,12 @@ public static class SourceReader
             if (name.StartsWith(".env",StringComparison.Ordinal) || name is "secrets.json" or "credentials.json" or "id_rsa" or "id_ed25519"
                 || new[]{".pem",".key",".pfx"}.Contains(Path.GetExtension(name)))
             { exclusions.Add(new(Path.GetRelativePath(root,full).Replace('\\','/'),"credential_candidate")); return; }
-            Data.Require(Extensions.Contains(Path.GetExtension(full)), "unsupported_input_format");
+            // Directory traversal records unsupported files as exclusions; an explicitly named file must be supported.
+            if (!Extensions.Contains(Path.GetExtension(full)))
+            {
+                Data.Require(fromDirectory, "unsupported_input_format");
+                exclusions.Add(new(Path.GetRelativePath(root,full).Replace('\\','/'),"unsupported_format")); return;
+            }
             Data.Require(candidates.TryAdd(full, role), "duplicate_input");
             Data.Require(candidates.Count <= 2000, "input_limit_exceeded");
         }

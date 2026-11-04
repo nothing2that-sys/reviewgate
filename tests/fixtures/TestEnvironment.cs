@@ -18,7 +18,7 @@ public sealed class TestEnvironment : IDisposable
         System.IO.File.WriteAllText(Path.Combine(Source,"Sample.cs"),text,Data.Utf8);
         Put("profile.json",new ReviewProfile(Data.Version,"code","code",[new("logic","Check correctness")],chunk,0));
         Put("reviewer.json",Reviewer);
-        Put("reviewer-b.json",Reviewer with{Id="b",HostingProvider="together",ApiProfile="chat_completions",CanonicalModelKey="fixture/b"});
+        Put("reviewer-b.json",Reviewer with{Id="b",HostingProvider="together",ModelId="fixture-model-b",ApiProfile="chat_completions",CanonicalModelKey="fixture/b"});
         Put("budget.json",new BudgetPolicy(Data.Version,10,20,30,MaxRetries:2));
         Put("prices.json",new PriceSnapshot(Data.Version,"synthetic",DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(-1),DateTimeOffset.UtcNow.AddDays(1),"synthetic://not-live-pricing",Data.Hash("synthetic"),[new("fixture/a",1,2),new("fixture/b",1,2)]));
         Put("fixture.json",new FixtureBundle(Data.Version,"test",responses??[new(Usage:new(100,20))]));

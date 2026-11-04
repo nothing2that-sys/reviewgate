@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using ReviewGate.Contracts;
 using ReviewGate.Core.Planning;
 using ReviewGate.Core.Sources;
@@ -15,7 +17,10 @@ public sealed class ReviewEngine(StateStore store)
     public async Task<CommandResult> ExecuteAsync(Plan p,Grant? grant,string? resumeRun=null,bool recoverOnly=false,
         ResolutionFixture? resolution=null,CancellationToken cancellation=default)
     {
-        Planner.CheckPins(p);
+        // Recovery and unknown resolution only touch the ledger and saved responses, so they must stay possible
+        // after the user edits original files; unchanged inputs are required only before a new dispatch.
+        if(recoverOnly)Data.Require(p.Hash==Data.Hash(Data.Json(p with{Hash=""})),"plan_hash_mismatch",13);
+        else Planner.CheckPins(p);
         using var owner=store.Own(p.ProjectId);
         RunRow run=resumeRun is null?store.NewRun(p):store.GetRun(resumeRun);
         CurrentRunId=run.Id;CurrentPlanId=p.Id;
@@ -26,13 +31,14 @@ public sealed class ReviewEngine(StateStore store)
         if(resolution is not null){Data.Require(recoverOnly,"resolution_requires_recover_only");store.Resolve(run,p,resolution);}
         bool unknown=store.Attempts(run.Id).Any(a=>a.Phase=="unknown");
         if(unknown)return new(13,SaveReport(p,run with{Status="needs_reconciliation",ErrorCode="reconciliation_required"},command)with{RequiredAction="reconcile_unknown_attempts"});
-        if(recoverOnly)return new(0,SaveReport(p,run with{Status="partial",ErrorCode=null},command)with{RequiredAction="resume_after_recovery"});
+        if(recoverOnly)return new(0,SaveReport(p,run with{Status=HasValidUnits(p,run)?"partial":"blocked",ErrorCode=null},command)with{RequiredAction="resume_after_recovery"});
         store.NewGeneration(run.Id);run=store.GetRun(run.Id);
-        if(grant is null)return new(10,SaveReport(p,run with{Status="blocked",ErrorCode="grant_required"},command)with{RequiredAction="supply_simulation_grant"});
+        if(grant is null)return new(10,SaveReport(p,run with{Status=HasValidUnits(p,run)?"partial":"blocked",ErrorCode="grant_required"},command)with{RequiredAction="supply_simulation_grant"});
         store.Status(run.Id,"running");
         string? error=null;int exit=0;
         try
         {
+            store.BindGrant(run,p,grant);
             var responseAttempts=store.Attempts(run.Id).Where(a=>a.Phase=="response_saved").ToList();
             foreach(var a in responseAttempts)ProcessSaved(p,run,a);
             if(store.Attempts(run.Id).Any(a=>a.CostUsd>a.ReservationUsd))throw new ReviewError(12,"reservation_overrun");
@@ -41,6 +47,8 @@ public sealed class ReviewEngine(StateStore store)
                 CheckCancel(run,cancellation);
                 if(store.Units(run.Id).Any(u=>u.UnitId==request.UnitId&&u.Valid))continue;
                 if(store.Attempts(run.Id).Any(a=>a.Phase=="unknown"))throw new ReviewError(13,"reconciliation_required");
+                // A request whose retries are used up stays incomplete without blocking the remaining requests.
+                if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));continue;}
                 StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
                 var a=store.Reserve(run,p,request,grant);
                 Checkpoint("reserved");CheckCancel(run,cancellation);
@@ -56,7 +64,9 @@ public sealed class ReviewEngine(StateStore store)
                 if(fixture.Status is "unknown" or "timeout" or "network_error" or "not_sent")
                 {store.Unknown(a.Id,fixture.Status=="not_sent"?"synthetic_not_sent_confirmed":"dispatch_outcome_unknown");throw new ReviewError(13,"reconciliation_required");}
                 var reviewer=p.Reviewers.Single(r=>r.Id==request.ReviewerId);
-                store.SaveResponse(a,new(a.Id,request.Id,p.Hash,WireAdapters.WrapFixture(reviewer,fixture),fixture.HttpStatus));
+                string wire=WireAdapters.WrapFixture(reviewer,fixture);
+                if(fixture.HttpStatus>=400)wire=WireAdapters.RedactErrorBody(wire);
+                store.SaveResponse(a,new(a.Id,request.Id,p.Hash,wire,fixture.HttpStatus));
                 Checkpoint("response_saved");
                 ProcessSaved(p,run,store.Attempts(run.Id).Single(x=>x.Id==a.Id));
                 Checkpoint("settled");
@@ -95,7 +105,9 @@ public sealed class ReviewEngine(StateStore store)
         {
             var findings=response.Status=="success"?ValidateFindings(p,req,response.Findings):[];
             bool valid=response.Status=="success"&&response.Disposition is "finding" or "no_finding";
-            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw","synthetic",response.Status=="success"?"valid":response.Status,response.Disposition,valid,CoreBytes(p,req),findings,valid?null:response.Status=="success"?response.Disposition:response.Status);
+            string validation=response.Status switch{"success"=>"valid","truncated"=>"truncated","refused"=>"refused",WireAdapters.InvalidPayload=>"invalid",_=>"failed"};
+            string? code=valid?null:response.Status=="success"?response.Disposition:response.Status==WireAdapters.InvalidPayload?"invalid_reviewer_payload":response.Status;
+            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw","synthetic",validation,response.Disposition,valid,CoreBytes(p,req),findings,code);
         }
         catch(ReviewError e){unit=Invalid(p,req,e.Code);}
         if(!response.Usage.Known){store.Uncertain(a,unit,"cost_unknown");return;}
@@ -125,7 +137,11 @@ public sealed class ReviewEngine(StateStore store)
             Data.Require(hits.Distinct().Count()==1,"missing_or_ambiguous_quote",21);int start=hits[0],end=start+quote.Length;
             string grade=f.ReportedEvidenceGrade=="unconfirmed"?"unconfirmed":f.ReportedEvidenceGrade=="inferred"||f.Assumptions.Count>0?"inferred":"observed";
             string id="finding_"+Data.Hash(req.Id+"\n"+(ordinal++)+"\n"+f.Claim+"\n"+f.Quote)[..24];
-            result.Add(new(id,req.Id,req.ReviewerId,req.CriterionId,sid,source.LogicalPath,source.ExportPath,Line(bytes,start),start,end,SourceReader.RawOffset(source,start),SourceReader.RawOffset(source,end),f.Kind,f.Category,f.Severity,f.Claim,f.Detail,f.Quote,f.ReportedEvidenceGrade,f.Assumptions,grade,true,true,f.Confidence,f.Suggestion,f.Impact,[]));
+            int line=Line(bytes,start);
+            // In a diff snapshot the line is the patch display line; before/after lines are carried separately and never substituted.
+            DiffLine? diff=Planner.IsDiff(source.LogicalPath)?UnifiedDiff.Parse(Data.Utf8.GetString(bytes)).SingleOrDefault(d=>d.DisplayLine==line):null;
+            result.Add(new(id,req.Id,req.ReviewerId,req.CriterionId,sid,source.LogicalPath,source.ExportPath,line,start,end,SourceReader.RawOffset(source,start),SourceReader.RawOffset(source,end),f.Kind,f.Category,f.Severity,f.Claim,f.Detail,f.Quote,f.ReportedEvidenceGrade,f.Assumptions,grade,true,true,f.Confidence,f.Suggestion,f.Impact,[],
+                Planner.IsDiff(source.LogicalPath)?"diff":"text",diff?.BeforeLine,diff?.AfterLine,diff?.OldPath,diff?.NewPath));
         }
         return result;
     }
@@ -136,8 +152,16 @@ public sealed class ReviewEngine(StateStore store)
         Data.Require(p.Requests.Select(q=>q.UnitId).Distinct().Count()==p.Requests.Count,"duplicate_unit",13);
         var valid=p.Requests.Where(q=>units.Any(u=>u.UnitId==q.UnitId&&u.RequestId==q.Id&&u.Valid&&u.Exposure=="raw"&&u.TransportState=="synthetic"&&u.ValidationState=="valid"&&u.ReviewDisposition is "finding" or "no_finding")).ToList();
         long total=p.Requests.Sum(q=>(long)CoreBytes(p,q)),done=valid.Sum(q=>(long)CoreBytes(p,q));
-        return new(p.Requests.Count,valid.Count,total,done,total==0?null:(decimal)done/total,null,valid.Count==p.Requests.Count,p.Requests.Where(q=>!valid.Any(v=>v.Id==q.Id)).Select(q=>q.UnitId).ToList());
+        var validIds=valid.Select(q=>q.Id).ToHashSet();
+        var pairs=p.Requests.GroupBy(q=>(q.CriterionId,q.ReviewerId,q.Stage)).Select(g=>
+        {
+            long pairTotal=g.Sum(q=>(long)CoreBytes(p,q)),pairDone=g.Where(q=>validIds.Contains(q.Id)).Sum(q=>(long)CoreBytes(p,q));
+            return new PairCoverage(g.Key.CriterionId,g.Key.ReviewerId,g.Key.Stage,g.Count(),g.Count(q=>validIds.Contains(q.Id)),pairTotal,pairDone,pairTotal==0?null:(decimal)pairDone/pairTotal,null);
+        }).ToList();
+        var empty=p.Sources.Where(s=>s.Role=="target"&&s.ByteLength==0).Select(s=>s.Id).ToList();
+        return new(p.Requests.Count,valid.Count,total,done,total==0?null:(decimal)done/total,null,valid.Count==p.Requests.Count,p.Requests.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
     }
+    bool HasValidUnits(Plan p,RunRow run)=>CoverageFor(p,store.Units(run.Id)).ValidUnits>0;
     public Envelope View(string runId,string command="status")
     {
         var r=store.GetRun(runId);var p=store.GetPlan(r.PlanId);var artifacts=store.Artifacts(runId);
@@ -151,12 +175,19 @@ public sealed class ReviewEngine(StateStore store)
         var comparisons=p.Requests.GroupBy(q=>(q.SourceId,q.ChunkIndex,q.CriterionId,q.Stage)).Select(g=>new{source_id=g.Key.SourceId,chunk=g.Key.ChunkIndex,criterion_id=g.Key.CriterionId,
             reviewers=g.Select(q=>new{reviewer_id=q.ReviewerId,result=units.SingleOrDefault(u=>u.UnitId==q.UnitId)}).ToList()}).ToList();
         string markdown="# ReviewGate synthetic review\n\nThis is fixture processing, not actual model review or an HGLOS round.\n\n"+Data.Json(coverage)+"\n\n";
-        foreach(var f in findings)markdown+=$"## {f.Id}: {f.Claim}\n\n{f.Path}:{f.Line} · {f.Severity} · {f.ExportedEvidenceGrade}\n\n{f.Detail}\n\n> {f.Quote.Replace("\n","\n> ",StringComparison.Ordinal)}\n\nSuggestion: {f.Suggestion}\n\n";
+        // Model-authored text is escaped so it cannot add links, HTML or headings to the report.
+        foreach(var f in findings)
+        {
+            string location=f.CoordinateSystem=="diff"?$"{Md(f.Path)} diff display line {f.Line} (before {f.DiffBeforeLine?.ToString(CultureInfo.InvariantCulture)??"-"}, after {f.DiffAfterLine?.ToString(CultureInfo.InvariantCulture)??"-"})":$"{Md(f.Path)}:{f.Line}";
+            string fence=new('`',Math.Max(3,Regex.Matches(f.Quote,"`+").Select(m=>m.Length+1).DefaultIfEmpty(0).Max()));
+            markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
+        }
         string dir=store.PathFor("runs",r.Id,"bundles",Data.Id("bundle"));
-        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode="synthetic",run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
+        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode="synthetic",run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
         var artifacts=BundleWriter.Write(store.Root,dir,files);BundleWriter.Verify(store.Root,artifacts);Checkpoint("bundle_precommit");store.CompleteBundle(r.Id,r.Status,r.ErrorCode,artifacts);
         return View(r.Id,command);
     }
+    static string Md(string text)=>Regex.Replace(text.Replace("\r"," ",StringComparison.Ordinal).Replace("\n"," ",StringComparison.Ordinal),@"([\\`*_{}\[\]()#+\-.!|<>~])",@"\$1");
     static List<Finding> LinkFindings(List<Finding> all)=>all.Select(f=>f with{RelatedFindingIds=all.Where(x=>x.Id!=f.Id&&x.SourceId==f.SourceId&&x.StartByte<f.EndByte&&x.EndByte>f.StartByte).Select(x=>x.Id).ToList()}).ToList();
     public CommandResult Export(string runId,string format,bool allowPartial)
     {
