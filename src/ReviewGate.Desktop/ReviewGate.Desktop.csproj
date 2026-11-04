@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ReviewGate.Desktop</AssemblyName>
+    <Version>0.3.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ReviewGate.App\ReviewGate.App.csproj" />
+  </ItemGroup>
+  <!-- Reviewer profiles, Review profiles, budget and price snapshots ship next to the executable. -->
+  <ItemGroup>
+    <None Include="..\..\profiles\**\*" LinkBase="profiles" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

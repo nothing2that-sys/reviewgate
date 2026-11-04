@@ -1,0 +1,231 @@
+<Window x:Class="ReviewGate.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ReviewGate" Height="760" Width="1100" MinHeight="560" MinWidth="820"
+        FontFamily="Malgun Gothic" FontSize="13" Loaded="OnLoaded">
+    <DockPanel>
+        <StatusBar DockPanel.Dock="Bottom">
+            <StatusBarItem><TextBlock x:Name="StatusText" Text="준비" /></StatusBarItem>
+        </StatusBar>
+        <TabControl Margin="8">
+            <!-- API keys -->
+            <TabItem Header="API 키">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="12">
+                        <GroupBox Header="제공자별 API 키">
+                            <StackPanel>
+                                <Grid x:Name="KeyGrid">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="OpenAI" VerticalAlignment="Center" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="OpenAiStatus" VerticalAlignment="Center" />
+                                    <PasswordBox Grid.Row="0" Grid.Column="2" x:Name="OpenAiKey" Margin="0,4,8,4" />
+                                    <StackPanel Grid.Row="0" Grid.Column="3" Orientation="Horizontal">
+                                        <Button Content="저장" Tag="openai" Click="OnSaveKey" />
+                                        <Button Content="삭제" Tag="openai" Click="OnDeleteKey" />
+                                        <Button Content="연결 테스트" Tag="openai" Click="OnConnectionTest" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="1" Text="Together AI" VerticalAlignment="Center" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TogetherStatus" VerticalAlignment="Center" />
+                                    <PasswordBox Grid.Row="1" Grid.Column="2" x:Name="TogetherKey" Margin="0,4,8,4" />
+                                    <StackPanel Grid.Row="1" Grid.Column="3" Orientation="Horizontal">
+                                        <Button Content="저장" Tag="together" Click="OnSaveKey" />
+                                        <Button Content="삭제" Tag="together" Click="OnDeleteKey" />
+                                        <Button Content="연결 테스트" Tag="together" Click="OnConnectionTest" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="2" Text="Google AI" VerticalAlignment="Center" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="GoogleStatus" VerticalAlignment="Center" />
+                                    <PasswordBox Grid.Row="2" Grid.Column="2" x:Name="GoogleKey" Margin="0,4,8,4" />
+                                    <StackPanel Grid.Row="2" Grid.Column="3" Orientation="Horizontal">
+                                        <Button Content="저장" Tag="google" Click="OnSaveKey" />
+                                        <Button Content="삭제" Tag="google" Click="OnDeleteKey" />
+                                        <Button Content="연결 테스트" Tag="google" Click="OnConnectionTest" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Style="{StaticResource Hint}" Text="키는 Windows 자격 증명 관리자에 저장되며 이 화면에 다시 표시되지 않습니다. 같은 Windows 계정에서 실행되는 프로그램은 저장된 키를 읽을 수 있으므로, 제공자 콘솔에서 ReviewGate 전용 키와 월 사용 한도를 함께 설정하세요." />
+                                <TextBlock Style="{StaticResource Hint}" Text="연결 테스트는 기본 모델로 4줄짜리 샘플 코드를 1번 보냅니다. 보내기 전에 비용 상한을 확인하는 창이 뜹니다." />
+                            </StackPanel>
+                        </GroupBox>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Models -->
+            <TabItem Header="모델">
+                <DockPanel Margin="12">
+                    <GroupBox DockPanel.Dock="Top" Header="기본 모델">
+                        <StackPanel>
+                            <CheckBox x:Name="GoogleFreeTier" Content="Google은 무료 티어로 사용 (가격 0으로 계산, 전송 전에 데이터 사용 경고 표시)" Margin="0,0,0,8" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="110" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="OpenAI" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="DefaultOpenAi" DisplayMemberPath="Display" Margin="0,2" />
+                                <TextBlock Grid.Row="1" Text="Together AI" VerticalAlignment="Center" />
+                                <ComboBox Grid.Row="1" Grid.Column="1" x:Name="DefaultTogether" DisplayMemberPath="Display" Margin="0,2" />
+                                <TextBlock Grid.Row="2" Text="Google AI" VerticalAlignment="Center" />
+                                <ComboBox Grid.Row="2" Grid.Column="1" x:Name="DefaultGoogle" DisplayMemberPath="Display" Margin="0,2" />
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button Content="설정 저장" Click="OnSaveSettings" />
+                            </StackPanel>
+                        </StackPanel>
+                    </GroupBox>
+                    <GroupBox DockPanel.Dock="Bottom" Header="모델 추가 (제공자가 새 모델을 낸 경우)">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <ComboBox x:Name="CustomProvider" Width="110" SelectedIndex="0">
+                                    <ComboBoxItem Content="openai" />
+                                    <ComboBoxItem Content="together" />
+                                    <ComboBoxItem Content="google" />
+                                </ComboBox>
+                                <TextBlock Text="  모델 ID " VerticalAlignment="Center" />
+                                <TextBox x:Name="CustomModelId" Width="260" />
+                                <CheckBox x:Name="CustomFree" Content=" 무료" VerticalAlignment="Center" Margin="12,0" />
+                                <TextBlock Text="입력 $" VerticalAlignment="Center" />
+                                <TextBox x:Name="CustomInput" Width="60" />
+                                <TextBlock Text="  출력 $" VerticalAlignment="Center" />
+                                <TextBox x:Name="CustomOutput" Width="60" />
+                                <TextBlock Text=" /100만 token  " VerticalAlignment="Center" />
+                                <Button Content="추가" Click="OnAddCustomModel" />
+                                <Button Content="선택한 사용자 모델 삭제" Click="OnRemoveCustomModel" />
+                            </StackPanel>
+                            <TextBlock Style="{StaticResource Hint}" Text="가격은 입력한 값으로 예산을 계산합니다. 제공자 가격표를 확인하고 입력하세요. 모델 ID는 제공자 문서의 이름을 그대로 씁니다(예: Together는 'zai-org/GLM-5.3-Flash')." />
+                        </StackPanel>
+                    </GroupBox>
+                    <DataGrid x:Name="ModelsGrid" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" Margin="0,0,0,12">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="제공자" Binding="{Binding Provider}" Width="90" />
+                            <DataGridTextColumn Header="모델" Binding="{Binding ModelId}" Width="*" />
+                            <DataGridTextColumn Header="가격" Binding="{Binding PriceText}" Width="260" />
+                            <DataGridTextColumn Header="최대 출력" Binding="{Binding MaxOutputTokens}" Width="80" />
+                            <DataGridTextColumn Header="추론 설정" Binding="{Binding ReasoningEffort}" Width="80" />
+                            <DataGridCheckBoxColumn Header="사용자 추가" Binding="{Binding Custom}" Width="80" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+
+            <!-- Quick test -->
+            <TabItem Header="간이 테스트">
+                <Grid Margin="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="430" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
+                        <StackPanel>
+                            <TextBlock Text="모델" FontWeight="SemiBold" />
+                            <ComboBox x:Name="ModelA" DisplayMemberPath="Label" Margin="0,4" />
+                            <TextBlock Text="두 번째 모델 (선택하면 서로의 결과를 보지 않는 독립 검수)" Style="{StaticResource Hint}" />
+                            <ComboBox x:Name="ModelB" DisplayMemberPath="Label" Margin="0,4" />
+                            <TextBlock Text="검수 유형" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <ComboBox x:Name="ProfileKind" SelectedIndex="0" Margin="0,4">
+                                <ComboBoxItem Content="코드" Tag="code" />
+                                <ComboBoxItem Content="기획서·문서" Tag="document" />
+                                <ComboBoxItem Content="소설" Tag="novel" />
+                            </ComboBox>
+                            <TextBlock Text="검수 지시" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <TextBox x:Name="Instruction" Height="60" TextWrapping="Wrap" AcceptsReturn="True" Margin="0,4"
+                                     Text="정확성 결함을 찾아 원문 인용과 함께 보고하세요. 근거가 없으면 지적하지 마세요." />
+                            <TextBlock Text="검수 자료" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <RadioButton x:Name="UseText" Content="텍스트 붙여넣기" IsChecked="True" Margin="0,4" />
+                            <TextBox x:Name="SourceText" Height="150" AcceptsReturn="True" AcceptsTab="True" FontFamily="Consolas"
+                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+                            <RadioButton x:Name="UsePath" Content="파일 또는 폴더" Margin="0,8,0,4" />
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="폴더" Click="OnPickFolder" Margin="4,0,0,0" MinWidth="50" />
+                                <Button DockPanel.Dock="Right" Content="파일" Click="OnPickFile" Margin="4,0,0,0" MinWidth="50" />
+                                <TextBox x:Name="SourcePath" />
+                            </DockPanel>
+                            <CheckBox x:Name="ConfirmNonSensitive" Margin="0,10,0,0">
+                                <TextBlock TextWrapping="Wrap" Text="외부 AI 제공자에게 보내도 되는 비민감 자료입니다 (회사 기밀·개인정보 아님)." />
+                            </CheckBox>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <Button x:Name="PreviewButton" Content="미리보기" Click="OnPreview" />
+                                <Button x:Name="RunButton" Content="승인하고 실행" Click="OnRun" IsEnabled="False" />
+                                <Button x:Name="CancelButton" Content="취소" Click="OnCancel" IsEnabled="False" />
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <DockPanel Grid.Column="1">
+                        <TextBox DockPanel.Dock="Top" x:Name="PreviewText" Height="150" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="#F7F7F7" />
+                        <TextBlock DockPanel.Dock="Top" x:Name="ResultSummary" Margin="0,10,0,4" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,6,0,0">
+                            <Button x:Name="ReportButton" Content="보고서 보기" Click="OnShowReport" IsEnabled="False" />
+                        </StackPanel>
+                        <ListBox DockPanel.Dock="Bottom" x:Name="NotesList" Height="60" Margin="0,6,0,0" />
+                        <DataGrid x:Name="FindingsGrid" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" RowDetailsVisibilityMode="VisibleWhenSelected">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="모델" Binding="{Binding Reviewer}" Width="120" />
+                                <DataGridTextColumn Header="종류" Binding="{Binding Kind}" Width="80" />
+                                <DataGridTextColumn Header="심각도" Binding="{Binding Severity}" Width="70" />
+                                <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="120" />
+                                <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
+                                <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="170" />
+                            </DataGrid.Columns>
+                            <DataGrid.RowDetailsTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="8">
+                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" />
+                                        <TextBox Text="{Binding Quote, Mode=OneWay}" IsReadOnly="True" FontFamily="Consolas" Margin="0,6,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGrid.RowDetailsTemplate>
+                        </DataGrid>
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- History -->
+            <TabItem Header="실행 기록">
+                <DockPanel Margin="12">
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Content="새로고침" Click="OnRefreshRuns" />
+                        <Button Content="결과 보기" Click="OnShowRun" />
+                        <Button Content="미확정 → 청구 없음으로 정리" Click="OnResolveNoCharge" />
+                        <Button Content="미확정 → 예약액을 비용으로 처리" Click="OnResolveConservative" />
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" Style="{StaticResource Hint}" Margin="0,0,0,8"
+                               Text="'미확정'은 요청을 보냈지만 응답·사용량을 받지 못한 경우입니다(시간 초과, 연결 끊김, 서버 혼잡). 무료 티어이거나 오류 응답이라 청구가 없다고 확인되면 '청구 없음'으로, 확인할 수 없으면 '예약액'으로 정리하세요." />
+                    <DataGrid x:Name="RunsGrid" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" Height="220" DockPanel.Dock="Top">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="시각" Binding="{Binding Created, StringFormat=yyyy-MM-dd HH:mm}" Width="130" />
+                            <DataGridTextColumn Header="프로젝트" Binding="{Binding Project}" Width="120" />
+                            <DataGridTextColumn Header="상태" Binding="{Binding Status}" Width="150" />
+                            <DataGridTextColumn Header="오류" Binding="{Binding ErrorCode}" Width="*" />
+                            <DataGridTextColumn Header="정산 USD" Binding="{Binding UsageUsd}" Width="100" />
+                            <DataGridTextColumn Header="미확정 USD" Binding="{Binding UnknownHoldUsd}" Width="100" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock DockPanel.Dock="Top" x:Name="HistorySummary" Margin="0,10,0,4" FontWeight="SemiBold" TextWrapping="Wrap" />
+                    <DataGrid x:Name="HistoryFindings" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="모델" Binding="{Binding Reviewer}" Width="120" />
+                            <DataGridTextColumn Header="종류" Binding="{Binding Kind}" Width="80" />
+                            <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="140" />
+                            <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
+                            <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="170" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Window>

@@ -68,6 +68,12 @@ public sealed class StateStore : IDisposable
         Exec("INSERT INTO runs VALUES($i,$p,$j,$s,$g,NULL,$c)",null,("$i",r.Id),("$p",r.PlanId),("$j",r.ProjectId),("$s",r.Status),("$g",r.Generation),("$c",r.CreatedAt.ToString("O")));
         return r;
     }
+    public List<RunRow> ListRuns(int limit=50)
+    {
+        using var c=Cmd("SELECT * FROM runs ORDER BY created DESC LIMIT $n",null,("$n",limit));using var r=c.ExecuteReader();var rows=new List<RunRow>();
+        while(r.Read())rows.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.IsDBNull(5)?null:r.GetString(5),DateTimeOffset.Parse(r.GetString(6),CultureInfo.InvariantCulture)));
+        return rows;
+    }
     public RunRow GetRun(string id)
     {
         ValidId(id);using var c=Cmd("SELECT * FROM runs WHERE id=$i",null,("$i",id));using var r=c.ExecuteReader();
