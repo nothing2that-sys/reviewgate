@@ -3,6 +3,9 @@ using ReviewGate.Core.Execution;
 using ReviewGate.Infrastructure;
 using ReviewGate.Testing;
 
+// Debug fault observers are static; test classes in this assembly must not run engines concurrently.
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
 namespace ReviewGate.StateTests;
 public sealed class RecoveryRegressionTests
 {
