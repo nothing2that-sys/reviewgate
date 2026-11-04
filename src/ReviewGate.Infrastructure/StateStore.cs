@@ -219,9 +219,12 @@ public sealed class StateStore : IDisposable
         {
             var a=Attempts(run.Id,tx).SingleOrDefault(a=>a.Id==item.AttemptId);Data.Require(a is not null&&a.Phase=="unknown","invalid_resolution_attempt",13);
             Data.Require(!string.IsNullOrWhiteSpace(item.Actor)&&!string.IsNullOrWhiteSpace(item.Basis)&&item.Timestamp!=default,"invalid_resolution");
-            Data.Require(item.Outcome is "not_sent" or "usage_confirmed" or "conservative_full_reservation","invalid_resolution",13);
+            Data.Require(item.Outcome is "not_sent" or "usage_confirmed" or "conservative_full_reservation" or "no_charge_confirmed","invalid_resolution",13);
             Data.Require(item.Outcome!="not_sent"||a!.ErrorCode=="synthetic_not_sent_confirmed","unproven_not_sent",13);
-            decimal value=item.Outcome=="not_sent"?0:item.Outcome=="conservative_full_reservation"?a!.ReservationUsd:item.AmountUsd??throw new ReviewError(13,"resolution_amount_required");
+            // no_charge_confirmed: a live request the user confirms was not billed (e.g. a free tier, or a provider error
+            // response). The basis is recorded verbatim in the ledger event; it is a declaration, not a measured usage.
+            Data.Require(item.Outcome!="no_charge_confirmed"||plan.ExecutionMode=="live","invalid_resolution",13);
+            decimal value=item.Outcome is "not_sent" or "no_charge_confirmed"?0:item.Outcome=="conservative_full_reservation"?a!.ReservationUsd:item.AmountUsd??throw new ReviewError(13,"resolution_amount_required");
             if(item.Outcome=="usage_confirmed")
             {
                 Data.Require(item.Usage is {Known:true},"resolution_usage_required",13);

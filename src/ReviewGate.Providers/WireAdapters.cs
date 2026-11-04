@@ -127,7 +127,8 @@ public static class WireAdapters
                 var p=Data.Parse<Payload>(text);
                 Data.Require(p.Status is "success" or "refused" or "truncated" or "error"&&p.Findings is not null,"invalid_reviewer_payload",21);
                 Data.Require(p.Disposition is "finding" or "no_finding" or "cannot_assess" or "not_reported","invalid_reviewer_disposition",21);
-                Data.Require((p.Disposition=="finding")== (p.Findings.Count>0),"inconsistent_findings",21);
+                // finding needs items; no_finding means no defect but may carry questions or suggestions; the rest carry none.
+                Data.Require(p.Disposition switch{"finding"=>p.Findings.Count>0,"no_finding"=>p.Findings.All(f=>f.Kind!="defect"),_=>p.Findings.Count==0},"inconsistent_findings",21);
                 return new(p.Status,p.Disposition,p.Findings,usage);
             }
             catch(ReviewError){return new(InvalidPayload,"not_reported",[],usage);}
@@ -180,6 +181,12 @@ public static class WireAdapters
             var root=JsonNode.Parse(json) as JsonObject;var error=new JsonObject();
             foreach(var name in new[]{"code","status","type"})
                 if(root?["error"]?[name] is JsonValue v&&v.ToJsonString().Trim('"') is var text&&System.Text.RegularExpressions.Regex.IsMatch(text,"^[A-Za-z0-9_.:-]{1,32}$"))error[name]=text;
+            // The message is kept for diagnosis with every key-like run (20+ word characters) masked and the length capped.
+            if(root?["error"]?["message"] is JsonValue m&&m.GetValueKind()==JsonValueKind.String)
+            {
+                string message=System.Text.RegularExpressions.Regex.Replace(m.GetValue<string>(),"[A-Za-z0-9_+/=-]{20,}","[masked]");
+                error["message"]=message.Length>300?message[..300]:message;
+            }
             return new JsonObject{["usage"]=root?["usage"]?.DeepClone(),["error"]=error,["redacted"]=true}.ToJsonString();
         }
         catch(Exception e)when(e is JsonException or InvalidOperationException){return new JsonObject{["redacted"]=true}.ToJsonString();}

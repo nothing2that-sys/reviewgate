@@ -17,7 +17,11 @@ public sealed class ReviewTests
     }
     [Theory][InlineData("absent")][InlineData("result")]
     public void MissingOrAmbiguousQuoteRejected(string quote)
-    {using var e=new TestEnvironment("result result\n");using var s=e.Store();var p=e.MakePlan(s);Assert.Equal("missing_or_ambiguous_quote",Assert.Throws<ReviewError>(()=>ReviewEngine.ValidateFindings(p,p.Requests[0],[Finding(quote)])).Code);}
+    {
+        // A missing or ambiguous quote is kept as an unverified finding (no location, never exported), not trusted as evidence.
+        using var e=new TestEnvironment("result result\n");using var s=e.Store();var p=e.MakePlan(s);var f=Assert.Single(ReviewEngine.ValidateFindings(p,p.Requests[0],[Finding(quote)]));
+        Assert.False(f.QuoteValid);Assert.False(f.LocationValid);Assert.Null(f.Line);Assert.Equal("unconfirmed",f.ExportedEvidenceGrade);
+    }
     [Theory][InlineData("observed",true,"inferred")][InlineData("unconfirmed",true,"unconfirmed")][InlineData("observed",false,"observed")]
     public void GradesDoNotPromoteAssertions(string reported,bool assumption,string expected)
     {using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var f=ReviewEngine.ValidateFindings(p,p.Requests[0],[Finding(grade:reported,assumptions:assumption?["Assumed runtime"]:[])]).Single();Assert.Equal(expected,f.ExportedEvidenceGrade);Assert.Equal(1,f.Line);}

@@ -178,21 +178,28 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
             Data.Require(!string.IsNullOrWhiteSpace(f.Claim)&&!f.Claim.Contains('\n')&&!f.Claim.Contains('\r')&&f.Claim.Length<=2000&&!string.IsNullOrWhiteSpace(f.Detail)
                 &&f.Kind is "defect" or "suggestion" or "question" or "verification_gap"&&f.ReportedEvidenceGrade is "observed" or "inferred" or "unconfirmed"
                 &&f.Severity is "critical" or "high" or "medium" or "low" or "style"&&f.Assumptions is not null&&!string.IsNullOrEmpty(f.Quote),"invalid_finding",21);
-            string sid=f.SourceId=="$source"?req.SourceId:p.Sources.SingleOrDefault(s=>s.Id==f.SourceId||s.LogicalPath==f.SourceId)?.Id??throw new ReviewError(21,"unknown_evidence_source");
-            var source=p.Sources.Single(s=>s.Id==sid);byte[] bytes=File.ReadAllBytes(source.TextPath),quote=Data.Utf8.GetBytes(f.Quote);
+            // Evidence is checked per finding. A quote that is missing, ambiguous or from an unknown source does not
+            // void the whole review unit: the finding is kept with quote_valid=false and never exported to HGLOS.
+            string? sid=f.SourceId=="$source"?req.SourceId:p.Sources.SingleOrDefault(s=>s.Id==f.SourceId||s.LogicalPath==f.SourceId)?.Id;
+            var source=p.Sources.Single(s=>s.Id==(sid??req.SourceId));byte[] bytes=File.ReadAllBytes(source.TextPath),quote=Data.Utf8.GetBytes(f.Quote);
             Data.Require(Data.Hash(bytes)==source.TextSha256,"snapshot_corrupt",13);
             var hits=new List<int>();
-            foreach(var span in req.AllowedSpans.Where(s=>s.SourceId==sid))
+            if(sid is not null)foreach(var span in req.AllowedSpans.Where(s=>s.SourceId==sid))
                 for(int i=span.Start;i<=span.End-quote.Length;i++)
-                    if((f.StartByte is null||f.StartByte==i)&&SourceReader.Boundary(bytes,i)&&bytes.AsSpan(i,quote.Length).SequenceEqual(quote)
-                        &&(f.Line is null||Line(bytes,i)==f.Line))hits.Add(i);
-            Data.Require(hits.Distinct().Count()==1,"missing_or_ambiguous_quote",21);int start=hits[0],end=start+quote.Length;
-            string grade=f.ReportedEvidenceGrade=="unconfirmed"?"unconfirmed":f.ReportedEvidenceGrade=="inferred"||f.Assumptions.Count>0?"inferred":"observed";
+                    if(SourceReader.Boundary(bytes,i)&&bytes.AsSpan(i,quote.Length).SequenceEqual(quote))hits.Add(i);
+            hits=hits.Distinct().ToList();
+            // Reported line/start_byte only disambiguate repeated quotes; the location itself is computed from the exact quote.
+            // A unique quote whose reported position disagrees stays quote-valid but location-invalid (a moved or miscounted line).
+            var hinted=hits.Where(i=>(f.StartByte is null||f.StartByte==i)&&(f.Line is null||Line(bytes,i)==f.Line)).ToList();
+            int? found=hits.Count==1?hits[0]:hinted.Count==1?hinted[0]:null;
+            bool quoteValid=found is not null,locationValid=quoteValid&&hinted.Contains(found!.Value);
+            int start=found??-1,end=quoteValid?start+quote.Length:-1;
+            string grade=!quoteValid||f.ReportedEvidenceGrade=="unconfirmed"?"unconfirmed":f.ReportedEvidenceGrade=="inferred"||f.Assumptions.Count>0?"inferred":"observed";
             string id="finding_"+Data.Hash(req.Id+"\n"+(ordinal++)+"\n"+f.Claim+"\n"+f.Quote)[..24];
-            int line=Line(bytes,start);
+            int? line=quoteValid?Line(bytes,start):null;
             // In a diff snapshot the line is the patch display line; before/after lines are carried separately and never substituted.
-            DiffLine? diff=Planner.IsDiff(source.LogicalPath)?UnifiedDiff.Parse(Data.Utf8.GetString(bytes)).SingleOrDefault(d=>d.DisplayLine==line):null;
-            result.Add(new(id,req.Id,req.ReviewerId,req.CriterionId,sid,source.LogicalPath,source.ExportPath,line,start,end,SourceReader.RawOffset(source,start),SourceReader.RawOffset(source,end),f.Kind,f.Category,f.Severity,f.Claim,f.Detail,f.Quote,f.ReportedEvidenceGrade,f.Assumptions,grade,true,true,f.Confidence,f.Suggestion,f.Impact,[],
+            DiffLine? diff=quoteValid&&Planner.IsDiff(source.LogicalPath)?UnifiedDiff.Parse(Data.Utf8.GetString(bytes)).SingleOrDefault(d=>d.DisplayLine==line):null;
+            result.Add(new(id,req.Id,req.ReviewerId,req.CriterionId,source.Id,source.LogicalPath,source.ExportPath,line,start,end,quoteValid?SourceReader.RawOffset(source,start):-1,quoteValid?SourceReader.RawOffset(source,end):-1,f.Kind,f.Category,f.Severity,f.Claim,f.Detail,f.Quote,f.ReportedEvidenceGrade,f.Assumptions,grade,quoteValid,locationValid,f.Confidence,f.Suggestion,f.Impact,[],
                 Planner.IsDiff(source.LogicalPath)?"diff":"text",diff?.BeforeLine,diff?.AfterLine,diff?.OldPath,diff?.NewPath));
         }
         return result;
@@ -233,9 +240,10 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         // Model-authored text is escaped so it cannot add links, HTML or headings to the report.
         foreach(var f in findings)
         {
+            string evidence=!f.QuoteValid?" · quote not found in the pinned source (not verified)":!f.LocationValid?" · reported line/offset disagrees with the quote":"";
             string location=f.CoordinateSystem=="diff"?$"{Md(f.Path)} diff display line {f.Line} (before {f.DiffBeforeLine?.ToString(CultureInfo.InvariantCulture)??"-"}, after {f.DiffAfterLine?.ToString(CultureInfo.InvariantCulture)??"-"})":$"{Md(f.Path)}:{f.Line}";
             string fence=new('`',Math.Max(3,Regex.Matches(f.Quote,"`+").Select(m=>m.Length+1).DefaultIfEmpty(0).Max()));
-            markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
+            markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}{evidence}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
         }
         string dir=store.PathFor("runs",r.Id,"bundles",Data.Id("bundle"));
         var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode=p.ExecutionMode,run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};

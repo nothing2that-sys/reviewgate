@@ -33,6 +33,18 @@ public sealed class AdversarialTests
     {using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p)with{ExpiresAt=DateTimeOffset.UtcNow.AddSeconds(-1)});Assert.Equal(10,r.ExitCode);Assert.Empty(s.Attempts());}
     [Fact] public async Task ArtifactLossMakesStatusFailInsteadOfClaimingCompleted()
     {using var e=new TestEnvironment();using var s=e.Store();var p=e.MakePlan(s);var engine=new ReviewEngine(s);var r=await engine.ExecuteAsync(p,e.Grant(p));File.Delete(Path.Combine(s.Root,r.Result.Artifacts[0].Path));Assert.Equal(13,Assert.Throws<ReviewError>(()=>engine.View(r.Result.RunId!)).ExitCode);}
-    [Fact] public void QuoteLineConstraintRejectsMovedLine()
-    {using var e=new TestEnvironment("header\nresult\n");using var s=e.Store();var p=e.MakePlan(s);Assert.Throws<ReviewError>(()=>ReviewEngine.ValidateFindings(p,p.Requests[0],[new("Issue","Reason","result",Line:1,Assumptions:[])]));}
+    [Fact] public void ReportedLineThatDisagreesWithTheQuoteIsLocationInvalid()
+    {
+        using var e=new TestEnvironment("header\nresult\n");using var s=e.Store();var p=e.MakePlan(s);
+        var f=Assert.Single(ReviewEngine.ValidateFindings(p,p.Requests[0],[new("Issue","Reason","result",Line:1,Assumptions:[])]));
+        // The quote is unique, so its true line (2) is computed; the model's line 1 marks the location invalid.
+        Assert.True(f.QuoteValid);Assert.False(f.LocationValid);Assert.Equal(2,f.Line);
+        var hinted=Assert.Single(ReviewEngine.ValidateFindings(p,p.Requests[0],[new("Issue","Reason","result",StartByte:99,Assumptions:[])]));Assert.False(hinted.LocationValid);
+    }
+    [Fact] public void LineHintDisambiguatesARepeatedQuote()
+    {
+        using var e=new TestEnvironment("result\nresult\n");using var s=e.Store();var p=e.MakePlan(s);
+        var f=Assert.Single(ReviewEngine.ValidateFindings(p,p.Requests[0],[new("Issue","Reason","result",Line:2,Assumptions:[])]));
+        Assert.True(f.QuoteValid&&f.LocationValid);Assert.Equal(7,f.StartByte);
+    }
 }

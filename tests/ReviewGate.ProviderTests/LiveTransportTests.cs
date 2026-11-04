@@ -171,6 +171,42 @@ public sealed class LiveTransportTests
         e.Put("reviewer.json", e.Reviewer with { HostingProvider = "google", ApiProfile = "interactions", MaxReasoningTokens = 512 });
         Assert.Equal("price_reasoning_rule_mismatch", Assert.Throws<ReviewError>(() => LivePlan(e)).Code);
     }
+    // Shape captured from the first real Together GLM-5.3-Flash answer (2026-11-04): no_finding plus a question item,
+    // a real source_id and a miscounted start_byte. It must count as a valid review with a location-invalid note.
+    [Fact] public async Task RealWorldNoFindingWithQuestionAndMiscountedOffsetIsAValidReview()
+    {
+        using var e = new TestEnvironment();var (store, plan) = LivePlan(e);var sid = plan.Sources.Single().Id;
+        string payload = new JsonObject { ["status"] = "success", ["disposition"] = "no_finding", ["findings"] = new JsonArray(new JsonObject {
+            ["claim"] = "Single declaration with no visible defect.", ["detail"] = "No use of the variable occurs in this chunk.", ["quote"] = "int result = 1;", ["source_id"] = sid,
+            ["category"] = "errorhandling", ["severity"] = "low", ["kind"] = "question", ["reported_evidence_grade"] = "unconfirmed", ["confidence"] = "high",
+            ["suggestion"] = "None required.", ["impact"] = "None", ["line"] = null, ["start_byte"] = 46, ["assumptions"] = new JsonArray("C# top-level statements assumed.") }) }.ToJsonString();
+        using (store) using (var transport = new HttpTransport(new FakeCredentials("openai"), Reply(HttpStatusCode.OK, OpenAiBody(payload))))
+        {
+            var r = await new ReviewEngine(store, transport).ExecuteAsync(plan, Issue(e, store, plan));
+            Assert.Equal(0, r.ExitCode);var unit = store.Units(r.Result.RunId!).Single();Assert.True(unit.Valid);Assert.Equal("no_finding", unit.ReviewDisposition);
+            var f = unit.Findings.Single();Assert.Equal("question", f.Kind);Assert.True(f.QuoteValid);Assert.False(f.LocationValid);Assert.Equal(1, f.Line);
+        }
+        // A defect under no_finding is still a contradiction.
+        Assert.Equal(WireAdapters.InvalidPayload, WireAdapters.Parse(Reviewer("openai"), OpenAiBody(payload.Replace("\"question\"", "\"defect\"", StringComparison.Ordinal))).Status);
+    }
+    [Fact] public void NoChargeResolutionIsLiveOnlyAndRecordsZeroCost()
+    {
+        using var e = new TestEnvironment();var (store, plan) = LivePlan(e);
+        using (store)
+        {
+            var run = store.NewRun(plan);var g = Issue(e, store, plan);var a = store.Reserve(run, plan, plan.Requests[0], g);store.Dispatch(a.Id);store.Unknown(a.Id, "cost_unknown");
+            store.Resolve(run, plan, new(Data.Version, plan.Hash, [new(a.Id, "no_charge_confirmed", "Google free tier; user confirmed no billing", "user", DateTimeOffset.UtcNow)], "live"));
+            var settled = store.Attempts(run.Id).Single();Assert.Equal(("settled", 0m), (settled.Phase, settled.CostUsd!.Value));Assert.Equal(0m, store.Costs(run.Id)["unknown_hold_usd"]!.GetValue<decimal>());
+        }
+        using var s = e.Store();var p = e.MakePlan(s);var r = s.NewRun(p);var b = s.Reserve(r, p, p.Requests[0], e.Grant(p));s.Dispatch(b.Id);s.Unknown(b.Id, "unknown");
+        Assert.Equal("invalid_resolution", Assert.Throws<ReviewError>(() => s.Resolve(r, p, new(Data.Version, p.Hash, [new(b.Id, "no_charge_confirmed", "claim", "user", DateTimeOffset.UtcNow)]))).Code);
+    }
+    [Fact] public void ErrorMessageIsKeptWithKeyLikeTokensMasked()
+    {
+        var redacted = JsonNode.Parse(WireAdapters.RedactErrorBody("{\"error\":{\"code\":\"service_unavailable\",\"message\":\"Model unavailable for key AIzaSyTESTONLYxxxxxxxxxxxxxxxxxxxxxxx. Retry later.\"}}"))!;
+        Assert.Equal("service_unavailable", redacted["error"]!["code"]!.GetValue<string>());
+        Assert.Equal("Model unavailable for key [masked]. Retry later.", redacted["error"]!["message"]!.GetValue<string>());
+    }
     [Fact] public void ShippedLiveProfilesPlanWithinTheSmokeBudget()
     {
         string profiles = Path.Combine(TestEnvironment.Repository, "profiles");

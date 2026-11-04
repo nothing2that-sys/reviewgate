@@ -161,7 +161,11 @@ public static class CliHost
         e.WriteLine($"  plan        {p.Id}  (project {p.ProjectId}, mode {p.Mode})");
         e.WriteLine($"  sources     {p.Sources.Count(s=>s.Role=="target")} target, {p.Sources.Count(s=>s.Role=="reference")} reference, {p.Sources.Sum(s=>(long)s.ByteLength)} bytes from {p.SourceRoot}");
         foreach(var r in p.Reviewers)
+        {
             e.WriteLine($"  reviewer    {r.Id}: {r.HostingProvider} {r.ModelId} -> {HttpTransport.Endpoints[r.HostingProvider]}  ({(r.HostingProvider=="together"?"store ignored; retention follows your Together account settings":"store=false sent")})");
+            if(p.Prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==r.CanonicalModelKey)?.Tier=="free")
+                e.WriteLine("  WARNING     free tier: the provider may use submitted content to improve its products and humans may review it. Do not send private or company material.");
+        }
         e.WriteLine($"  requests    {p.Requests.Count}, reservation upper bound {reserve.ToString(System.Globalization.CultureInfo.InvariantCulture)} USD (usage-based, not an invoice)");
         e.WriteLine($"  this grant  max {maxUsd.ToString(System.Globalization.CultureInfo.InvariantCulture)} USD, {maxRequests} requests, {retries} retries, expires in {minutes} min");
         if(reserve>maxUsd)e.WriteLine("  note        the grant cap is below the full reservation; the run will stop early with exit 12.");
