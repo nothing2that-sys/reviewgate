@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"code-v1","kind":"code","criteria":[{"id":"correctness","description":"요구사항과 구현의 일치, 버그·회귀 위험·테스트 누락을 근거와 함께 검토한다.","scope":"chunk"}],"chunk_bytes":8192,"context_bytes":256}

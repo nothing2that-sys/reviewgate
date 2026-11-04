@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.packages/
+.work/
+TestResults/
+*.user
+*.suo
+.vs/
+.env*
+**/state.db*
+**/*.lock

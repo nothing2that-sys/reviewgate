@@ -10,9 +10,9 @@ OpenAI, Together AI, Google AI의 제공자와 모델을 선택하여 소설 원
 
 - 프로젝트명: **ReviewGate**
 - 저장소: [nothing2that-sys/reviewgate](https://github.com/nothing2that-sys/reviewgate)
-- 단계: **v0.1 오프라인 설계 기준본 완료 — 독립 검토·지적 반영 완료**
-- 구현 코드·실행 가능한 CLI·빌드·테스트·설치 절차: **아직 없음**
-- 제품 모델 API 호출·API 키 발급/입력/저장/연결: **하지 않음**. 별도로 사용자 요청의 기존 Claude Code Headless 독립 설계 검토를 수행했습니다.
+- 단계: **v0.1 오프라인 구현 후보 — 로컬 테스트·Release 실행 검증, 독립 구현 검토 대기**
+- Windows .NET 10 CLI: `plan`, `exec`, `status`, `cancel`, `resume`, `export`. 실행은 고정 synthetic fixture만 사용합니다.
+- 실제 모델 API 호출·키 조회/발급/입력/저장/연결: **없음**. 이전 Claude Code 검토는 설계 문서 검토이며 이번 구현 검토를 대신하지 않습니다.
 
 이 저장소의 문서는 합의 사항과 검토 중인 제안을 함께 기록합니다. 문서 커밋·푸시는 구현이나 외부 전송의 승인을 뜻하지 않습니다.
 
@@ -40,6 +40,18 @@ OpenAI, Together AI, Google AI의 제공자와 모델을 선택하여 소설 원
 | [원문·근거·HGLOS 상세 계약](docs/SOURCE_EVIDENCE_AND_HGLOS.md) | 원문 좌표·diff·독립성·처리 범위·findings projection·보존 정책 |
 | [독립 설계 검토 종결 기록](validation/design-review-20261104/DESIGN_REVIEW.md) | Claude Code 공식 사용법 적용, 독립 검토 원문·지적 반영·조건 해소·한계 |
 
-## 다음 단계
+## 오프라인 실행
 
-설계 기준본과 단계별 완료 기준을 검토한 뒤 구현 착수 여부를 별도로 선택합니다. 구현과 API 키 연결은 명시적 요청 전에는 진행하지 않습니다. CLI 명령·필드·종료 코드는 설계 계약이며 현재 실행 가능한 기능이 아닙니다.
+필요 환경은 Windows의 .NET 10 SDK입니다. HGLOS 계약 테스트에만 Python 3가 필요합니다. 런타임·도구 설치나 키 설정은 자동 수행하지 않습니다.
+
+```powershell
+dotnet restore ReviewGate.sln
+dotnet publish src/ReviewGate.Cli/ReviewGate.Cli.csproj -c Release --no-restore -o .work/publish
+./scripts/offline-demo.ps1
+```
+
+데모는 동봉된 합성 파일과 임의 단가를 사용하고 **simulation grant**를 만듭니다. 실제 모델의 검수·가격·청구·정확도를 측정하지 않습니다. `--execution-mode live`는 exit 14로 차단합니다.
+
+전체 검증은 `./scripts/verify-offline.ps1 -Python '<확인한 python.exe 절대 경로>'`로 실행합니다. 빈 suite·누락·skip을 통과로 세지 않습니다. [실행 안내](docs/OFFLINE_USAGE.md), [구현·검증 보고서](validation/offline-v0.1/IMPLEMENTATION_REPORT.md)에 사용법과 제한을 기록합니다.
+
+실제 모델 연결과 HGLOS의 기존 회차 실행기 교체는 후속 승인 범위입니다. 현재 구현은 사용자 요청에 따른 로컬 checkpoint 커밋에 포함하며, 선행 설계 문서 커밋만 원격에 푸시했습니다.

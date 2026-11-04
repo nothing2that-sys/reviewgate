@@ -1,0 +1,1 @@
+{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"status\":\"success\",\"disposition\":\"no_finding\",\"findings\":[]}"}]}],"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}

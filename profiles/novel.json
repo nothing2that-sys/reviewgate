@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"novel-v1","kind":"novel","criteria":[{"id":"prose","description":"문장과 대화의 자연스러움을 검토하고 취향 제안과 결함을 구분한다.","scope":"chunk"},{"id":"continuity","description":"인물·설정·사건의 일관성을 원문 간 근거로 검토한다.","scope":"relation"}],"chunk_bytes":8192,"context_bytes":256}

@@ -1,0 +1,1 @@
+Chat completions uses messages and response_format. Response choices contain message.content and finish_reason. Read usage prompt_tokens, completion_tokens and cached/reasoning detail variants. The compatibility documentation says store is accepted but ignored. This local paraphrase is not a complete API specification.

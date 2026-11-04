@@ -1,0 +1,4 @@
+{
+  "schema_version":"1.0",
+  "suites":["ReviewGate.ContractTests","ReviewGate.SourceTests","ReviewGate.CliTests","ReviewGate.HglosTests","ReviewGate.StateTests","ReviewGate.ReviewTests","ReviewGate.ProviderTests","ReviewGate.OfflineE2E"]
+}

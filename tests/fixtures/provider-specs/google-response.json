@@ -1,0 +1,1 @@
+{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"{\"status\":\"success\",\"disposition\":\"no_finding\",\"findings\":[]}"}]}],"usage":{"total_input_tokens":100,"total_output_tokens":20,"total_tokens":120}}

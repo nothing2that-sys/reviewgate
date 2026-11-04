@@ -1,0 +1,16 @@
+{
+  "schema_version":"1.0",
+  "options":{
+    "state_root":"../../../.work/demo-state",
+    "project":"offline-demo",
+    "source_root":"source",
+    "repository_root":"../../..",
+    "input_class":"synthetic",
+    "profile":"../../../profiles/code.json",
+    "reviewer":["reviewer.json"],
+    "budget_policy":"budget.json",
+    "prices":"prices.json",
+    "fixture":"response.json",
+    "input":["Sample.cs"]
+  }
+}

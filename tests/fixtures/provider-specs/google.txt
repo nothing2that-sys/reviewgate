@@ -1,0 +1,1 @@
+Interactions supports store=false. Structured output response_format uses type text, mime_type application/json and schema. Responses expose chronological steps including model_output with text content. Usage normalization must retain unknown when totals cannot be reconciled. This local paraphrase is not a complete API specification.

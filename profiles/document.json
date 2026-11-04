@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"document-v1","kind":"document","criteria":[{"id":"clarity","description":"모호한 표현과 실행 가능성의 전제를 검토한다.","scope":"chunk"},{"id":"requirements","description":"요구사항 누락과 문서 간 충돌을 원문 간 근거로 검토한다.","scope":"relation"}],"chunk_bytes":8192,"context_bytes":256}

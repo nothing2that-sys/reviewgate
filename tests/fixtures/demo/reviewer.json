@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"fixture-openai","hosting_provider":"openai","model_id":"synthetic-fixture-model","api_profile":"responses","canonical_model_key":"synthetic/model-a","model_developer":"synthetic","model_version":"fixture-v1","input_token_upper_bound":4096,"max_output_tokens":1024,"max_reasoning_tokens":0,"max_request_bytes":65536}

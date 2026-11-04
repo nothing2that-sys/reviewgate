@@ -1,0 +1,1 @@
+Responses structured output request uses text.format with type json_schema, name, strict and schema. Parse output message content output_text separately from refusal and incomplete status. Usage is outside model-authored findings. This local paraphrase is not a complete API specification.
