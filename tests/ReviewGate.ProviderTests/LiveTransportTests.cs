@@ -186,6 +186,9 @@ public sealed class LiveTransportTests
             Assert.Equal(0, r.ExitCode);var unit = store.Units(r.Result.RunId!).Single();Assert.True(unit.Valid);Assert.Equal("no_finding", unit.ReviewDisposition);
             var f = unit.Findings.Single();Assert.Equal("question", f.Kind);Assert.True(f.QuoteValid);Assert.False(f.LocationValid);Assert.Equal(1, f.Line);
         }
+        // Second captured shape: an all-empty placeholder defect appended under no_finding is dropped, not a contradiction.
+        var padded = JsonNode.Parse(payload)!;padded["findings"]!.AsArray().Add(new JsonObject { ["claim"] = "", ["detail"] = "", ["quote"] = "", ["source_id"] = "", ["category"] = "nullderef", ["severity"] = "high", ["kind"] = "defect", ["reported_evidence_grade"] = "unconfirmed", ["confidence"] = "low", ["suggestion"] = "", ["impact"] = "", ["line"] = null, ["start_byte"] = null, ["assumptions"] = new JsonArray() });
+        var parsed = WireAdapters.Parse(Reviewer("openai"), OpenAiBody(padded.ToJsonString()));Assert.Equal(("success", "no_finding", 1), (parsed.Status, parsed.Disposition, parsed.Findings.Count));
         // A defect under no_finding is still a contradiction.
         Assert.Equal(WireAdapters.InvalidPayload, WireAdapters.Parse(Reviewer("openai"), OpenAiBody(payload.Replace("\"question\"", "\"defect\"", StringComparison.Ordinal))).Status);
     }
