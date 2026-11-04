@@ -168,11 +168,18 @@ public static class WireAdapters
     public static long InputTokenBound(ReviewerProfile r,string body)=>Math.Max(r.InputTokenUpperBound,(long)Data.Utf8.GetByteCount(body)+FramingTokenAllowance);
     public static decimal Reservation(ReviewerProfile r,PriceRow p,string body)=>((decimal)InputTokenBound(r,body)*Math.Max(p.InputPerMillion,p.CachedInputPerMillion)
         +(decimal)r.MaxOutputTokens*p.OutputPerMillion+(p.OutputIncludesReasoning?0:(decimal)r.MaxReasoningTokens*p.ReasoningPerMillion))/1_000_000m;
-    // Error bodies may echo account or key fragments; only the usage envelope is retained.
+    // Error bodies may echo account or key fragments, so messages are dropped. Only the usage envelope and the
+    // short machine-readable error fields (code / status / type, e.g. 503 / UNAVAILABLE) are kept for diagnosis.
     public static string RedactErrorBody(string json)
     {
-        try{var root=JsonNode.Parse(json) as JsonObject;return new JsonObject{["usage"]=root?["usage"]?.DeepClone(),["redacted"]=true}.ToJsonString();}
-        catch(JsonException){return new JsonObject{["redacted"]=true}.ToJsonString();}
+        try
+        {
+            var root=JsonNode.Parse(json) as JsonObject;var error=new JsonObject();
+            foreach(var name in new[]{"code","status","type"})
+                if(root?["error"]?[name] is JsonValue v&&v.ToJsonString().Trim('"') is var text&&System.Text.RegularExpressions.Regex.IsMatch(text,"^[A-Za-z0-9_.:-]{1,32}$"))error[name]=text;
+            return new JsonObject{["usage"]=root?["usage"]?.DeepClone(),["error"]=error,["redacted"]=true}.ToJsonString();
+        }
+        catch(Exception e)when(e is JsonException or InvalidOperationException){return new JsonObject{["redacted"]=true}.ToJsonString();}
     }
     record Payload(string Status,string Disposition,List<FixtureFinding> Findings);
 }

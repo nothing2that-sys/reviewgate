@@ -43,7 +43,13 @@ public sealed class ProviderTests
     public void IndependentWireBodiesKeepNonSuccessStatusAndUsage(string provider,string wire,string expected)
     {var r=WireAdapters.Parse(Reviewer(provider),wire);Assert.Equal(expected,r.Status);Assert.Equal("not_reported",r.Disposition);Assert.True(r.Usage.Known);Assert.Equal(3,r.Usage.InputTokens);}
     [Fact] public void ErrorBodyRedactionKeepsOnlyUsage()
-    {var redacted=WireAdapters.RedactErrorBody("{\"error\":{\"message\":\"TEST_SECRET_SENTINEL\"},\"usage\":{\"input_tokens\":1}}");Assert.DoesNotContain("TEST_SECRET_SENTINEL",redacted);Assert.Contains("input_tokens",redacted);}
+    {
+        var redacted=WireAdapters.RedactErrorBody("{\"error\":{\"message\":\"TEST_SECRET_SENTINEL\"},\"usage\":{\"input_tokens\":1}}");Assert.DoesNotContain("TEST_SECRET_SENTINEL",redacted);Assert.Contains("input_tokens",redacted);
+        // Google-style error: short code/status kept for diagnosis, free-text message dropped; values with spaces or key-like content are dropped too.
+        var google=JsonNode.Parse(WireAdapters.RedactErrorBody("{\"error\":{\"code\":503,\"message\":\"The model is overloaded. TEST_SECRET_SENTINEL\",\"status\":\"UNAVAILABLE\",\"type\":\"has spaces TEST_SECRET_SENTINEL\"}}"))!;
+        Assert.Equal("503",google["error"]!["code"]!.GetValue<string>());Assert.Equal("UNAVAILABLE",google["error"]!["status"]!.GetValue<string>());Assert.Null(google["error"]!["type"]);
+        Assert.DoesNotContain("TEST_SECRET_SENTINEL",google.ToJsonString());
+    }
     [Fact] public void GoogleUnexplainedUsageRemainsUnknown()
     {var r=Reviewer("google");var wire=JsonNode.Parse(WireAdapters.WrapFixture(r,new(Usage:new(100,20))))!;wire["usage"]!["total_tokens"]=130;Assert.False(WireAdapters.Parse(r,wire.ToJsonString()).Usage.Known);}
     [Fact] public void ReasoningIncludedOutputIsNotChargedTwice()
