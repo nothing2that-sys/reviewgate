@@ -43,6 +43,22 @@ public partial class MainWindow : Window
         foreach (var group in service.Keys())
         {
             string provider = group.Provider.Id;
+            if (group.Provider.IsCli)
+            {
+                // Agent CLIs use their own login; there is no key to store, only the executable to find.
+                var cliBody = new StackPanel();
+                cliBody.Children.Add(new TextBlock { Style = (Style)FindResource("Hint"), Text = group.CliPath is null
+                    ? $"{group.Provider.Endpoint}를 찾지 못했습니다. CLI를 설치하고 한 번 로그인하세요."
+                    : "이 CLI에 로그인한 계정(구독)으로 실행됩니다. ReviewGate는 키를 저장하지 않습니다. 샌드박스 없이 매번 빈 임시 폴더에서 실행합니다." });
+                var cliTest = new Button { Content = "연결 테스트", IsEnabled = group.CliPath is not null, Margin = new Thickness(0, 6, 0, 0), HorizontalAlignment = HorizontalAlignment.Left };
+                cliTest.Click += async (_, _) => await ConnectionTest(provider);cliBody.Children.Add(cliTest);
+                KeyPanels.Children.Add(new GroupBox
+                {
+                    Header = new TextBlock { Text = $"{group.Provider.DisplayName} — {group.Status}", FontWeight = FontWeights.SemiBold, Foreground = group.Ready ? Brushes.DarkGreen : Brushes.Gray },
+                    Content = cliBody
+                });
+                continue;
+            }
             var list = new ListBox { Height = 86, Margin = new Thickness(0, 4, 0, 6) };
             foreach (var key in group.Keys)
                 list.Items.Add(new ListBoxItem
@@ -79,7 +95,7 @@ public partial class MainWindow : Window
             body.Children.Add(new Separator { Margin = new Thickness(0, 8, 0, 8) });body.Children.Add(add);
             KeyPanels.Children.Add(new GroupBox
             {
-                Header = new TextBlock { Text = $"{group.Provider.DisplayName} — {group.Status}", FontWeight = FontWeights.SemiBold, Foreground = group.Keys.Any(k => k.Active) ? Brushes.DarkGreen : Brushes.Gray },
+                Header = new TextBlock { Text = $"{group.Provider.DisplayName} — {group.Status}", FontWeight = FontWeights.SemiBold, Foreground = group.Ready ? Brushes.DarkGreen : Brushes.Gray },
                 Content = body
             });
         }
@@ -135,7 +151,7 @@ public partial class MainWindow : Window
             var primary = models.FirstOrDefault(m => m.Id == settings.DefaultModels.GetValueOrDefault(p.Id) && m.Priced);
             var fallback = models.FirstOrDefault(m => m.Id == settings.FallbackModels?.GetValueOrDefault(p.Id) && m.Priced);
             string label = primary is null ? $"{p.DisplayName} — 대표 모델 없음" :
-                $"{p.DisplayName} — {primary.ModelId}{(fallback is null ? "" : $" (서브 {fallback.ModelId})")} — {(keys[p.Id] ? "사용 중 키 있음" : "키 없음")}";
+                $"{p.DisplayName} — {primary.ModelId}{(fallback is null ? "" : $" (서브 {fallback.ModelId})")} — {(keys[p.Id] ? (p.IsCli ? "CLI 사용 가능" : "사용 중 키 있음") : (p.IsCli ? "CLI 없음" : "키 없음"))}";
             return new ReviewerChoice(label, p.Id, primary, fallback);
         }).ToList();
     }
@@ -262,7 +278,8 @@ public partial class MainWindow : Window
         (r.ProcessingRatio is decimal ratio ? $" · 처리율 {ratio:P0}" : "");
     static string Explain(string code) => code switch
     {
-        "credential_missing" => "사용 중인 API 키가 없습니다. API 키 탭에서 키를 추가하거나 선택하세요",
+        "credential_missing" => "사용 중인 API 키가 없거나 CLI가 설치되어 있지 않습니다. API 키 탭을 확인하세요",
+        "cli_not_found" => "CLI 실행 파일을 찾지 못했습니다",
         "unauthorized" => "제공자가 API 키를 거부했습니다",
         "price_missing" => "선택한 모델의 가격 정보가 없습니다. 모델 탭에서 가격을 입력하거나 무료로 표시하세요",
         "price_snapshot_unavailable" or "price_snapshot_expired" => "가격표 유효기간이 지났습니다. 가격표를 갱신해야 합니다",

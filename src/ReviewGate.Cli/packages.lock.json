@@ -78,6 +78,12 @@
           "ReviewGate.Contracts": "[1.0.0, )"
         }
       },
+      "reviewgate.transport.cli": {
+        "type": "Project",
+        "dependencies": {
+          "ReviewGate.Contracts": "[1.0.0, )"
+        }
+      },
       "reviewgate.transport.http": {
         "type": "Project",
         "dependencies": {

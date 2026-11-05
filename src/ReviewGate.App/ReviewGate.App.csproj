@@ -7,5 +7,6 @@
   <ItemGroup>
     <ProjectReference Include="..\ReviewGate.Core\ReviewGate.Core.csproj" />
     <ProjectReference Include="..\ReviewGate.Transport.Http\ReviewGate.Transport.Http.csproj" />
+    <ProjectReference Include="..\ReviewGate.Transport.Cli\ReviewGate.Transport.Cli.csproj" />
   </ItemGroup>
 </Project>

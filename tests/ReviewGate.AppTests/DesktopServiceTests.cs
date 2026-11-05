@@ -29,7 +29,7 @@ public sealed class DesktopServiceTests
         { Sent++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) }); }
     }
     static string Profiles => Path.Combine(TestEnvironment.Repository, "profiles");
-    static DesktopService Service(TestEnvironment e, FakeCredentials keys, Recorder? http = null) => new(e.State, Profiles, keys, () => http, () => Clock);
+    static DesktopService Service(TestEnvironment e, FakeCredentials keys, Recorder? http = null) => new(e.State, Profiles, keys, () => http, () => Clock, locateCli: _ => null);
     static string OpenAiAnswer(string payload) => new JsonObject
     {
         ["status"] = "completed",
@@ -62,7 +62,7 @@ public sealed class DesktopServiceTests
     [Fact] public async Task PrimaryWithoutAnswerHandsOverToItsFallbackAndFreeTierNeedsNoReconciliation()
     {
         using var e = new TestEnvironment();var keys = new FakeCredentials();keys.Add("google", "test", Key);
-        var handler = new ModelSwitch();var app = new DesktopService(e.State, Profiles, keys, () => handler, () => Clock);
+        var handler = new ModelSwitch();var app = new DesktopService(e.State, Profiles, keys, () => handler, () => Clock, locateCli: _ => null);
         var settings = app.LoadSettings();Assert.Equal("google-gemini-3.5-flash-lite", settings.FallbackModels!["google"]);
         var preview = app.PrepareQuickTest(new(["google-gemini-3.5-flash"], "code", "Review", DesktopService.SampleCode, null, true, ["google-gemini-3.5-flash-lite"]));
         Assert.Equal(2, preview.Requests);Assert.Contains(preview.Recipients, r => r.Contains("응답이 없으면 서브: google gemini-3.5-flash-lite", StringComparison.Ordinal));
@@ -85,7 +85,7 @@ public sealed class DesktopServiceTests
     [Fact] public void ShippedModelsShowPricesAndGoogleFreeTierSetting()
     {
         using var e = new TestEnvironment();var app = Service(e, new());
-        var models = app.Models();Assert.Equal(8, models.Count);Assert.All(models, m => Assert.False(m.Custom));
+        var models = app.Models();Assert.Equal(11, models.Count);Assert.All(models, m => Assert.False(m.Custom));
         Assert.True(models.Single(m => m.Id == "google-gemini-3.5-flash").Free);Assert.Equal(0.10m, models.Single(m => m.Id == "openai-gpt-6-luna").InputPerMillion);
         Assert.Equal("google-gemini-3.5-flash", app.LoadSettings().DefaultModels["google"]);
         app.SaveSettings(app.LoadSettings() with { GoogleFreeTier = false });
@@ -132,7 +132,7 @@ public sealed class DesktopServiceTests
     {
         // A paid model: its unknown charge cannot be settled from the price alone, so the user decides.
         using var e = new TestEnvironment();var keys = new FakeCredentials();keys.Add("openai", "test", Key);
-        var busy = new BusyHandler();var app = new DesktopService(e.State, Profiles, keys, () => busy, () => Clock);
+        var busy = new BusyHandler();var app = new DesktopService(e.State, Profiles, keys, () => busy, () => Clock, locateCli: _ => null);
         var preview = app.PrepareQuickTest(new(["openai-gpt-6-luna"], "code", "Review", DesktopService.SampleCode, null, true));
         var result = await app.RunAsync(preview.PlanId, app.Approve(preview.PlanId, 0.05m));
         Assert.True(result.UnknownHoldUsd > 0);

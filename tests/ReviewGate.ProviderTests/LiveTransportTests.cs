@@ -217,7 +217,7 @@ public sealed class LiveTransportTests
     [Fact] public void ShippedLiveProfilesPlanWithinTheSmokeBudget()
     {
         string profiles = Path.Combine(TestEnvironment.Repository, "profiles");
-        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(8, reviewers.Length);
+        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(11, reviewers.Length);
         foreach (var reviewer in reviewers)
         {
             using var e = new TestEnvironment();
@@ -227,7 +227,8 @@ public sealed class LiveTransportTests
             var prices = Path.Combine(profiles, "prices", freeOnly ? "live-2026-11-04-google-free.json" : "live-2026-11-04.json");
             var plan = Planner.Build(store, new("smoke", e.Source, e.Source, "nonsensitive", "Review supplied source", Path.Combine(profiles, "code.json"), [reviewer], Path.Combine(profiles, "budget-live.json"), prices, null, ["Sample.cs"], []));
             var request = Assert.Single(plan.Requests);
-            if (freeOnly) { Assert.Equal(0m, request.ReservationUsd); continue; }
+            // Agent CLIs run on the signed-in subscription: no token price, nothing reserved.
+            if (freeOnly || reviewer.Contains("-cli")) { Assert.Equal(0m, request.ReservationUsd); continue; }
             // The reservation is the declared worst case (full input, output and thinking bounds), not an expected charge.
             // One small file stays well under the 1 USD run budget; the low-cost models stay under 10 cents.
             Assert.InRange(request.ReservationUsd, 0.0001m, 0.5m);

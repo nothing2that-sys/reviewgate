@@ -43,6 +43,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ReviewGate.AppTests", "test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ReviewGate.Desktop", "src\ReviewGate.Desktop\ReviewGate.Desktop.csproj", "{D02FACB8-AABD-44A8-A4BF-3C8EBF035862}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ReviewGate.Transport.Cli", "src\ReviewGate.Transport.Cli\ReviewGate.Transport.Cli.csproj", "{667AD35E-73BC-47BE-B4F2-CE012F8519CF}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -269,6 +271,18 @@ Global
 		{D02FACB8-AABD-44A8-A4BF-3C8EBF035862}.Release|x64.Build.0 = Release|Any CPU
 		{D02FACB8-AABD-44A8-A4BF-3C8EBF035862}.Release|x86.ActiveCfg = Release|Any CPU
 		{D02FACB8-AABD-44A8-A4BF-3C8EBF035862}.Release|x86.Build.0 = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|x64.Build.0 = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Debug|x86.Build.0 = Debug|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|x64.ActiveCfg = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|x64.Build.0 = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|x86.ActiveCfg = Release|Any CPU
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -292,5 +306,6 @@ Global
 		{B209613F-D444-4C06-A4DF-BDB95DE6E9E5} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{408C35FA-68FA-486D-8732-F312E497CBDA} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{D02FACB8-AABD-44A8-A4BF-3C8EBF035862} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{667AD35E-73BC-47BE-B4F2-CE012F8519CF} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

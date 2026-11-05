@@ -51,6 +51,7 @@
         "type": "Project",
         "dependencies": {
           "ReviewGate.Core": "[1.0.0, )",
+          "ReviewGate.Transport.Cli": "[1.0.0, )",
           "ReviewGate.Transport.Http": "[1.0.0, )"
         }
       },
@@ -80,6 +81,12 @@
         }
       },
       "reviewgate.providers": {
+        "type": "Project",
+        "dependencies": {
+          "ReviewGate.Contracts": "[1.0.0, )"
+        }
+      },
+      "reviewgate.transport.cli": {
         "type": "Project",
         "dependencies": {
           "ReviewGate.Contracts": "[1.0.0, )"

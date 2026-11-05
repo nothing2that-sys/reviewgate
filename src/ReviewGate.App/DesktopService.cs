@@ -14,15 +14,18 @@ public record ModelOption(string Id, string Provider, string ModelId, string Can
 {
     public bool Priced => InputPerMillion is not null;
     public bool Free => Tier == "free";
-    public string PriceText => !Priced ? "가격 없음 (실행 불가)" : Free ? "무료 티어" :
+    public string PriceText => !Priced ? "가격 없음 (실행 불가)" : Free ? "무료 티어" : Tier == "subscription" ? "구독 (CLI 로그인, 토큰 단가 없음)" :
         $"입력 ${InputPerMillion!.Value.ToString(CultureInfo.InvariantCulture)} / 출력 ${OutputPerMillion!.Value.ToString(CultureInfo.InvariantCulture)} (100만 token)";
     public string Display => $"{Provider} · {ModelId}{(Custom ? " (사용자 추가)" : "")}";
 }
 // Per provider: the primary model and an optional fallback used only when the primary gives no answer.
 public record DesktopSettings(string SchemaVersion, bool GoogleFreeTier, Dictionary<string, string> DefaultModels, Dictionary<string, string>? FallbackModels = null);
-public record ProviderKeys(ProviderInfo Provider, IReadOnlyList<CredentialEntry> Keys)
+// HTTP providers list named keys; CLI providers use their own login, so only the executable location is shown.
+public record ProviderKeys(ProviderInfo Provider, IReadOnlyList<CredentialEntry> Keys, string? CliPath = null)
 {
-    public string Status => Keys.SingleOrDefault(k => k.Active) is { } active ? $"사용 중: {active.Name}" : Keys.Count == 0 ? "키 없음" : "사용할 키를 선택하세요";
+    public bool Ready => Provider.IsCli ? CliPath is not null : Keys.Any(k => k.Active);
+    public string Status => Provider.IsCli ? (CliPath is null ? $"{Provider.Endpoint} 설치되지 않음" : $"CLI 로그인 사용 · {CliPath}") :
+        Keys.SingleOrDefault(k => k.Active) is { } active ? $"사용 중: {active.Name}" : Keys.Count == 0 ? "키 없음" : "사용할 키를 선택하세요";
 }
 public record QuickTestRequest(List<string> ReviewerIds, string ProfileKind, string Instruction, string? Text, string? SourcePath, bool ConfirmedNonSensitive, List<string?>? FallbackIds = null);
 public record QuickPreview(string PlanId, string Mode, int Requests, decimal ReservationUsd, List<string> Recipients, List<string> Warnings, int SourceFiles, long SourceBytes, List<string> Exclusions);
@@ -34,7 +37,7 @@ public record RunView(string RunId, string Project, string Status, string? Error
 // Everything the desktop screens do, without any UI type. It drives the same planner, ledger, grant and engine
 // as the CLI; the only desktop-specific parts are where settings live and how approval is collected.
 public sealed class DesktopService(string stateRoot, string profilesRoot, ICredentialStore credentials,
-    Func<HttpMessageHandler?>? handler = null, Func<DateTimeOffset>? clock = null)
+    Func<HttpMessageHandler?>? handler = null, Func<DateTimeOffset>? clock = null, Func<IModelTransport>? cli = null, Func<string, string?>? locateCli = null)
 {
     public const string Project = "desktop";
     public static IEnumerable<string> Providers => ProviderCatalog.Ids;
@@ -46,8 +49,10 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     StateStore Open() => new(stateRoot, clock, "live");
 
     // ---- API keys: names and which one is active; values are written once and never read back to the UI.
-    public List<ProviderKeys> Keys() => ProviderCatalog.All.Select(p => new ProviderKeys(p, credentials.List(p.Id))).ToList();
-    public Dictionary<string, bool> CredentialStatus() => ProviderCatalog.Ids.ToDictionary(p => p, p => credentials.List(p).Any(k => k.Active));
+    public List<ProviderKeys> Keys() => ProviderCatalog.All.Select(p => p.IsCli
+        ? new ProviderKeys(p, [], (locateCli ?? ReviewGate.Transport.Cli.CliTransport.DefaultLocate)(p.Endpoint))
+        : new ProviderKeys(p, credentials.List(p.Id))).ToList();
+    public Dictionary<string, bool> CredentialStatus() => Keys().ToDictionary(k => k.Provider.Id, k => k.Ready);
     public string AddKey(string provider, string name, string key) => credentials.Add(ProviderCatalog.Get(provider).Id, name, key);
     public bool RemoveKey(string provider, string keyId) => credentials.Remove(ProviderCatalog.Get(provider).Id, keyId);
     public void ActivateKey(string provider, string keyId) => credentials.Activate(ProviderCatalog.Get(provider).Id, keyId);
@@ -55,7 +60,7 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     // ---- Settings and models.
     public DesktopSettings LoadSettings()
     {
-        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash" },
+        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash", ["claude-cli"] = "claude-cli", ["codex-cli"] = "codex-cli", ["agy-cli"] = "agy-cli" },
             new() { ["google"] = "google-gemini-3.5-flash-lite" });
         if (!File.Exists(SettingsFile)) return defaults;
         var saved = Data.Read<DesktopSettings>(SettingsFile);
@@ -154,10 +159,12 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             if (m.Free) warnings.Add($"{m.Provider} {m.ModelId}: 무료 티어 — 제공자가 보낸 내용을 제품 개선에 쓰고 사람이 검토할 수 있습니다. 비공개·회사 자료는 보내지 마세요.");
             if (m.Provider == "together") warnings.Add("Together: store 옵션을 무시합니다. 보관 여부는 Together 계정 설정을 따릅니다.");
             if (m.Custom) warnings.Add($"{m.ModelId}: 사용자가 추가한 모델이며 가격은 사용자가 입력한 값입니다.");
+            if (ProviderCatalog.Get(m.Provider).IsCli)
+                warnings.Add($"{ProviderCatalog.Get(m.Provider).DisplayName}: 로그인한 구독 계정으로 처리됩니다(학습 사용·보관은 그 계정 설정을 따름). 비용은 구독 사용량이며 ReviewGate는 token 수만 기록합니다. 샌드박스 없이 임시 폴더에서 실행됩니다.");
         }
         return new(plan.Id, plan.Mode, plan.Requests.Count, plan.Requests.Sum(r => r.ReservationUsd),
-            reviewers.SelectMany((m, i) => new[] { $"{m.Provider} {m.ModelId} → {HttpTransport.Endpoints[m.Provider]}" }
-                .Concat(i < fallbacks.Count && fallbacks[i] is { } f ? [$"   응답이 없으면 서브: {f.Provider} {f.ModelId} → {HttpTransport.Endpoints[f.Provider]}"] : Array.Empty<string>())).ToList(), warnings,
+            reviewers.SelectMany((m, i) => new[] { $"{m.Provider} {m.ModelId} → {ProviderCatalog.Get(m.Provider).Endpoint}" }
+                .Concat(i < fallbacks.Count && fallbacks[i] is { } f ? [$"   응답이 없으면 서브: {f.Provider} {f.ModelId} → {ProviderCatalog.Get(f.Provider).Endpoint}"] : Array.Empty<string>())).ToList(), warnings,
             plan.Sources.Count(s => s.Role == "target"), plan.Sources.Sum(s => (long)s.ByteLength), plan.Exclusions.Select(e => $"{e.Path} ({e.Reason})").ToList());
     }
     // The desktop confirmation dialog is the approval channel; like the CLI prompt it is a local confirmation,
@@ -173,7 +180,7 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     public async Task<QuickResult> RunAsync(string planId, Grant grant, CancellationToken cancellation = default)
     {
         using var store = Open();var plan = store.GetPlan(planId);
-        using var transport = new HttpTransport(credentials, handler?.Invoke());
+        using var transport = new ReviewGate.Transport.Cli.RoutingTransport(new HttpTransport(credentials, handler?.Invoke()), cli?.Invoke() ?? new ReviewGate.Transport.Cli.CliTransport());
         var engine = new ReviewEngine(store, transport);
         try
         {

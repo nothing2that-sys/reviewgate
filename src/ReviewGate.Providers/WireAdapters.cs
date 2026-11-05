@@ -21,13 +21,19 @@ public static class WireAdapters
         {
             "openai"=>r.ReasoningEffort is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max",
             "google"=>r.ReasoningEffort is "minimal" or "low" or "medium" or "high",
-            _=>r.ReasoningEffort is "none" or "low" or "medium" or "high"
+            "together"=>r.ReasoningEffort is "none" or "low" or "medium" or "high",
+            _=>false
         }),"unsupported_reasoning_effort",14);
     }
+    // A CLI reviewer whose model id starts with "default" runs the CLI's configured default model (no --model flag).
+    public static bool UsesCliDefaultModel(ReviewerProfile r)=>r.ModelId.StartsWith("default",StringComparison.Ordinal);
     public static string Build(ReviewerProfile r,string sourcePayload)
     {
         Validate(r);JsonObject body;
-        if(r.HostingProvider=="openai") body=new(){["model"]=r.ModelId,["store"]=false,["instructions"]=SystemInstruction,["input"]=sourcePayload,["max_output_tokens"]=r.MaxOutputTokens,
+        if(ProviderCatalog.Get(r.HostingProvider).IsCli)
+            // Agent CLIs take the system text, the request and the schema; the CLI transport turns this into a command line.
+            body=new(){["cli"]=r.HostingProvider,["model"]=UsesCliDefaultModel(r)?null:r.ModelId,["system"]=SystemInstruction,["prompt"]=sourcePayload,["schema"]=PayloadSchema()};
+        else if(r.HostingProvider=="openai") body=new(){["model"]=r.ModelId,["store"]=false,["instructions"]=SystemInstruction,["input"]=sourcePayload,["max_output_tokens"]=r.MaxOutputTokens,
             ["text"]=new JsonObject{["format"]=new JsonObject{["type"]="json_schema",["name"]="reviewgate_findings",["strict"]=true,["schema"]=PayloadSchema()}}};
         else if(r.HostingProvider=="together") body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=SystemInstruction},new JsonObject{["role"]="user",["content"]=sourcePayload}),
             ["max_tokens"]=r.MaxOutputTokens,["response_format"]=new JsonObject{["type"]="json_schema",["json_schema"]=new JsonObject{["name"]="reviewgate_findings",["schema"]=PayloadSchema()}}};
@@ -72,7 +78,10 @@ public static class WireAdapters
         var usage=f.Usage??new Usage(0,0,Known:false);
         string payload=Data.Json(new Payload(f.Status,f.Disposition,f.Findings??[]));
         JsonObject result;
-        if(r.HostingProvider=="openai") result=new(){["status"]=f.Status=="truncated"?"incomplete":"completed",["output"]=new JsonArray(new JsonObject{["type"]="message",["content"]=new JsonArray(new JsonObject{["type"]=f.Status=="refused"?"refusal":"output_text",["text"]=payload})}),
+        if(ProviderCatalog.Get(r.HostingProvider).IsCli)result=new(){["cli"]=r.HostingProvider,["status"]=f.Status is "success" or "truncated" or "refused" or "error"?"completed":"failed",
+            ["structured_output"]=JsonNode.Parse(payload),["model"]=null,["exit_code"]=0,
+            ["usage"]=usage.Known?new JsonObject{["input_tokens"]=usage.InputTokens,["cached_input_tokens"]=usage.CachedInputTokens,["output_tokens"]=usage.OutputTokens,["thinking_tokens"]=usage.ReasoningTokens}:null};
+        else if(r.HostingProvider=="openai") result=new(){["status"]=f.Status=="truncated"?"incomplete":"completed",["output"]=new JsonArray(new JsonObject{["type"]="message",["content"]=new JsonArray(new JsonObject{["type"]=f.Status=="refused"?"refusal":"output_text",["text"]=payload})}),
             ["usage"]=usage.Known?new JsonObject{["input_tokens"]=usage.InputTokens,["output_tokens"]=usage.OutputTokens,["input_tokens_details"]=new JsonObject{["cached_tokens"]=usage.CachedInputTokens},["output_tokens_details"]=new JsonObject{["reasoning_tokens"]=usage.ReasoningTokens}}:null};
         else if(r.HostingProvider=="together")result=new(){["choices"]=new JsonArray(new JsonObject{["finish_reason"]=f.Status=="truncated"?"length":f.Status=="refused"?"content_filter":"stop",["message"]=new JsonObject{["content"]=payload}}),
             ["usage"]=usage.Known?new JsonObject{["prompt_tokens"]=usage.InputTokens,["completion_tokens"]=usage.OutputTokens,["prompt_tokens_details"]=new JsonObject{["cached_tokens"]=usage.CachedInputTokens},["completion_tokens_details"]=new JsonObject{["reasoning_tokens"]=usage.ReasoningTokens}}:null};
@@ -88,7 +97,16 @@ public static class WireAdapters
             var usage=ReadUsage(reviewer.HostingProvider,root["usage"]);
             if(httpStatus>=400)return new(httpStatus is 401 or 403?"unauthorized":httpStatus==429?"rate_limited":"error","not_reported",[],usage);
             string text="";string status="success";
-            if(reviewer.HostingProvider=="openai")
+            if(ProviderCatalog.Get(reviewer.HostingProvider).IsCli)
+            {
+                // Normalized by the CLI transport: {status: completed|failed, error, structured_output, usage, model}.
+                if(root["status"]?.GetValue<string>()!="completed")
+                    return new(root["error"]?.GetValue<string>() is "unauthorized" or "rate_limited" ? root["error"]!.GetValue<string>() : "error","not_reported",[],usage);
+                // A CLI can finish "successfully" without honouring the schema (agy answers in prose); that is an invalid result.
+                if(root["structured_output"] is not JsonObject structured)return new(InvalidPayload,"not_reported",[],usage);
+                text=structured.ToJsonString();
+            }
+            else if(reviewer.HostingProvider=="openai")
             {
                 // completed | incomplete (max_output_tokens → truncated, content_filter → refused) | failed/cancelled/other → error
                 string? state=root["status"]?.GetValue<string>();
@@ -143,6 +161,13 @@ public static class WireAdapters
     {
         if(u is null)return new(0,0,Known:false);
         static long Value(JsonNode? n)=>n?.GetValue<long>()??0;
+        if(ProviderCatalog.Get(provider).IsCli)
+        {
+            // CLI transport normalizes every CLI to input (incl. cache) / cached / output / thinking token counts.
+            long cliIn=Value(u["input_tokens"]),cliOut=Value(u["output_tokens"]),cliCache=Value(u["cached_input_tokens"]),cliThink=Value(u["thinking_tokens"]);
+            Data.Require(cliIn>=0&&cliOut>=0&&cliCache>=0&&cliCache<=cliIn&&cliThink>=0,"invalid_usage",21);
+            return new(cliIn,cliOut,cliCache,cliThink,u["input_tokens"] is not null&&u["output_tokens"] is not null);
+        }
         string i=provider=="openai"?"input_tokens":provider=="together"?"prompt_tokens":"total_input_tokens";
         string o=provider=="openai"?"output_tokens":provider=="together"?"completion_tokens":"total_output_tokens";
         bool known=u[i] is not null&&u[o] is not null;long input=Value(u[i]),output=Value(u[o]),cache=0,reason=0;

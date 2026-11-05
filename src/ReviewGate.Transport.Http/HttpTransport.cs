@@ -12,7 +12,7 @@ public sealed class HttpTransport : IModelTransport, IDisposable
     public const string GoogleApiRevision = "2026-05-20";
     public const int MaxResponseBytes = 8 * 1024 * 1024;
     // Fixed endpoints come only from the provider catalog; nothing in a plan or response can change them.
-    public static readonly IReadOnlyDictionary<string, Uri> Endpoints = ProviderCatalog.All.ToDictionary(p => p.Id, p => new Uri(p.Endpoint));
+    public static readonly IReadOnlyDictionary<string, Uri> Endpoints = ProviderCatalog.All.Where(p => !p.IsCli).ToDictionary(p => p.Id, p => new Uri(p.Endpoint));
     readonly ICredentialStore credentials;
     readonly HttpClient client;
     public HttpTransport(ICredentialStore credentials, HttpMessageHandler? handler = null)

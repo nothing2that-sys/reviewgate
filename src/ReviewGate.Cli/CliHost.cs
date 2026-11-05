@@ -77,7 +77,7 @@ public static class CliHost
             // The namespace comes from the plan/run ID, so a live run is never opened in the synthetic ledger or vice versa.
             string ns=command is "status" or "cancel" or "resume" or "export"?StateStore.NamespaceOf(o.Need("run")):o.Has("plan")?StateStore.NamespaceOf(o.Need("plan")):o.One("execution-mode")??"synthetic";
             Data.Require(o.One("execution-mode") is null||o.One("execution-mode")==ns,"execution_mode_mismatch");
-            using var store=new StateStore(state,null,ns);using var transport=ns=="live"?new HttpTransport(CredentialFactory(),HandlerFactory()):null;engine=new ReviewEngine(store,transport);
+            using var store=new StateStore(state,null,ns);using var transport=ns=="live"?new ReviewGate.Transport.Cli.RoutingTransport(new HttpTransport(CredentialFactory(),HandlerFactory()),CliFactory()):null;engine=new ReviewEngine(store,transport);
             if(command=="grant"){CheckOutput(o,store.GetPlan(o.Need("plan")),store.Root);safeOutput=o.One("output");return IssueGrant(o,store) with{OutputPath=o.One("output")};}
             if(command is "status" or "cancel" or "resume" or "export")
             {
@@ -118,6 +118,7 @@ public static class CliHost
     // Seams for tests; the shipped CLI uses Windows Credential Manager and the default network handler.
     public static Func<ICredentialStore> CredentialFactory {get;set;}=()=>OperatingSystem.IsWindows()?new KeyRing(new WindowsCredentialVault()):throw new ReviewError(14,"credential_store_unsupported");
     public static Func<HttpMessageHandler?> HandlerFactory {get;set;}=()=>null;
+    public static Func<IModelTransport> CliFactory {get;set;}=()=>new ReviewGate.Transport.Cli.CliTransport();
     // Keys are typed by the user into this console only; they are never accepted from arguments, files,
     // environment variables or redirected stdin, and never echoed or returned.
     static CommandResult Credential(Options o)
@@ -166,7 +167,7 @@ public static class CliHost
         e.WriteLine($"  sources     {p.Sources.Count(s=>s.Role=="target")} target, {p.Sources.Count(s=>s.Role=="reference")} reference, {p.Sources.Sum(s=>(long)s.ByteLength)} bytes from {p.SourceRoot}");
         foreach(var r in p.Reviewers)
         {
-            e.WriteLine($"  reviewer    {r.Id}: {r.HostingProvider} {r.ModelId} -> {HttpTransport.Endpoints[r.HostingProvider]}  ({(r.HostingProvider=="together"?"store ignored; retention follows your Together account settings":"store=false sent")})");
+            e.WriteLine($"  reviewer    {r.Id}: {r.HostingProvider} {r.ModelId} -> {ProviderCatalog.Get(r.HostingProvider).Endpoint}  ({(r.HostingProvider=="together"?"store ignored; retention follows your Together account settings":"store=false sent")})");
             if(p.Prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==r.CanonicalModelKey)?.Tier=="free")
                 e.WriteLine("  WARNING     free tier: the provider may use submitted content to improve its products and humans may review it. Do not send private or company material.");
         }

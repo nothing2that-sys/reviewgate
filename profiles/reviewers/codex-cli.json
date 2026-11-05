@@ -1,0 +1,1 @@
+{"schema_version": "1.0", "id": "codex-cli", "hosting_provider": "codex-cli", "model_id": "default:codex", "api_profile": "codex_cli", "canonical_model_key": "openai/codex-default", "model_developer": "openai", "model_version": "", "input_token_upper_bound": 1, "max_output_tokens": 1, "max_reasoning_tokens": 0, "max_request_bytes": 262144, "timeout_seconds": 900}

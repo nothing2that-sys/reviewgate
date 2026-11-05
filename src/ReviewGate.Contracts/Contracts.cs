@@ -221,7 +221,12 @@ public interface ICredentialVault
 }
 // Every provider the product can call. Adding a provider means adding one entry here plus its wire adapter;
 // the CLI, key screens and model screens read this list instead of hard-coding provider names.
-public record ProviderInfo(string Id, string DisplayName, string ApiProfile, string Endpoint, string KeyHeader);
+// Kind "http": an API called with a stored key at a fixed endpoint. Kind "cli": a locally installed agent CLI run
+// headless with its own login; Endpoint is then the executable file name.
+public record ProviderInfo(string Id, string DisplayName, string ApiProfile, string Endpoint, string KeyHeader, string Kind = "http")
+{
+    public bool IsCli => Kind == "cli";
+}
 public static class ProviderCatalog
 {
     public static readonly IReadOnlyList<ProviderInfo> All =
@@ -229,6 +234,9 @@ public static class ProviderCatalog
         new("openai", "OpenAI", "responses", "https://api.openai.com/v1/responses", "Authorization: Bearer"),
         new("together", "Together AI", "chat_completions", "https://api.together.ai/v1/chat/completions", "Authorization: Bearer"),
         new("google", "Google AI", "interactions", "https://generativelanguage.googleapis.com/v1beta/interactions", "x-goog-api-key"),
+        new("claude-cli", "Claude Code CLI", "claude_cli", "claude.exe", "login", "cli"),
+        new("codex-cli", "Codex CLI", "codex_cli", "codex.exe", "login", "cli"),
+        new("agy-cli", "Antigravity CLI", "agy_cli", "agy.exe", "login", "cli"),
     ];
     public static IEnumerable<string> Ids => All.Select(p => p.Id);
     public static ProviderInfo Get(string id) => All.SingleOrDefault(p => p.Id == id) ?? throw new ReviewError(2, "unsupported_provider");

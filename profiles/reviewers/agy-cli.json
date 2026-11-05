@@ -1,0 +1,1 @@
+{"schema_version": "1.0", "id": "agy-cli", "hosting_provider": "agy-cli", "model_id": "default:antigravity", "api_profile": "agy_cli", "canonical_model_key": "google/antigravity-default", "model_developer": "google", "model_version": "", "input_token_upper_bound": 1, "max_output_tokens": 1, "max_reasoning_tokens": 0, "max_request_bytes": 262144, "timeout_seconds": 900}
