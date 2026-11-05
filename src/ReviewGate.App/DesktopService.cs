@@ -38,8 +38,9 @@ public record ReviewRequest(List<ReviewerPick> Reviewers, string Instruction, st
     string? RepositoryRoot = null, string ProfileKind = "code", bool UseFallbacks = true, string? Project = null);
 public record QuickPreview(string PlanId, string Mode, int Requests, decimal ReservationUsd, List<string> Recipients, List<string> Warnings, int SourceFiles, long SourceBytes, List<string> Exclusions);
 public record FindingView(string Reviewer, string Kind, string Severity, string Location, string Claim, string Detail, string Quote, string Evidence);
+// Attempts: one entry per call (attempt), each with its model_identity (see ModelIdentity).
 public record QuickResult(string? RunId, string Status, string? ErrorCode, decimal UsageUsd, decimal UnknownHoldUsd, decimal? ProcessingRatio,
-    List<FindingView> Findings, List<string> UnitNotes, string? ReportPath);
+    List<FindingView> Findings, List<string> UnitNotes, string? ReportPath, System.Text.Json.Nodes.JsonArray? Attempts = null);
 public record PriceStatus(string SnapshotId, DateTimeOffset EffectiveTo, int DaysLeft, bool Expired, bool UserApproved)
 {
     public bool NoticeDue => Expired || DaysLeft <= PriceRefresh.NoticeDays;
@@ -48,7 +49,7 @@ public record PriceStatus(string SnapshotId, DateTimeOffset EffectiveTo, int Day
 }
 // One API worker call: answer status (success, truncated, refused, error, unknown, over_cost_cap), the answer text,
 // the settled cost, the reservation it was held against, how the cost was decided, and the reported usage.
-public record ApiJobResult(string Status, string Text, decimal CostUsd, decimal ReservationUsd, string Basis, Usage? Usage);
+public record ApiJobResult(string Status, string Text, decimal CostUsd, decimal ReservationUsd, string Basis, Usage? Usage, System.Text.Json.Nodes.JsonObject? Identity = null);
 public record RunView(string RunId, string Project, string Status, string? ErrorCode, DateTimeOffset Created, decimal UsageUsd, decimal UnknownHoldUsd);
 
 // Everything the desktop screens do, without any UI type. It drives the same planner, ledger, grant and engine
@@ -262,7 +263,10 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             string provider = ProviderCatalog.Get(p.Provider).Id;
             if (p.Model is not string named)
                 return ById(settings.DefaultModels.TryGetValue(provider, out var d) ? d : throw new ReviewError(2, "no_default_model"));
-            return models.FirstOrDefault(m => m.Provider == provider && (m.Id == named || string.Equals(m.ModelId, named, StringComparison.OrdinalIgnoreCase)))
+            if (models.FirstOrDefault(m => m.Provider == provider && m.Id == named) is { } byId) return byId;
+            // A CLI with a full model id runs the built-in CLI profile (its limits) with that model passed on.
+            if (ProviderCatalog.Get(provider).IsCli) return CliModel(provider, named, models);
+            return models.FirstOrDefault(m => m.Provider == provider && string.Equals(m.ModelId, named, StringComparison.OrdinalIgnoreCase))
                 ?? throw new ReviewError(2, "unknown_model");
         }).ToList();
         return primaries.Select(m =>
@@ -271,6 +275,23 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             if (fallback is not null && primaries.Any(p => p.Id == fallback.Id)) fallback = null;
             return (m, fallback);
         }).ToList();
+    }
+    // "codex-cli=<model id>": the built-in profile of that CLI (request size and time limits, subscription price row,
+    // reviewer id and model key) with only the model id replaced, so the id is passed to the CLI (-m / --model).
+    // A policy that allows the CLI therefore allows it with any model id; the id is recorded in the plan and in each
+    // call's model_identity. The profile file is content-addressed under desktop\cli-models so a plan's pinned copy
+    // never changes.
+    ModelOption CliModel(string provider, string modelId, List<ModelOption> models)
+    {
+        modelId = modelId.Trim();
+        Data.Require(Regex.IsMatch(modelId, "^[A-Za-z0-9][A-Za-z0-9._/:\\[\\]-]{0,127}$") && !modelId.StartsWith("default", StringComparison.OrdinalIgnoreCase), "invalid_model_id");
+        var builtIn = models.SingleOrDefault(m => m.Id == provider && !m.Custom) ?? throw new ReviewError(2, "unknown_model");
+        if (string.Equals(builtIn.ModelId, modelId, StringComparison.Ordinal)) return builtIn;
+        var profile = Data.Read<ReviewerProfile>(builtIn.File) with { ModelId = modelId };
+        WireAdapters.Validate(profile);
+        string json = Data.Json(profile), file = Path.Combine(DesktopDir, "cli-models", Data.Hash(json)[..16], provider + ".json");
+        if (!File.Exists(file)) Data.CreateFile(file, json);
+        return builtIn with { ModelId = modelId, File = file };
     }
     public QuickPreview PrepareReview(ReviewRequest request)
     {
@@ -373,9 +394,14 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         Data.Require(transport.HasCredential(profile.HostingProvider), "credential_missing", 11);
         string id;
         using (var store = Open()) { id = store.ReserveImplementCall(implementId, profile.HostingProvider, profile.CanonicalModelKey, reserve, budget);store.DispatchImplementCall(id); }
+        TransportResult? sent = null;
         ApiJobResult Settle(string status, string text, decimal cost, string basis, Usage? usage)
-        { using var store = Open();store.SettleImplementCall(id, cost, basis);return new(status, text, cost, reserve, basis, usage); }
-        TransportResult sent;
+        {
+            using var store = Open();store.SettleImplementCall(id, cost, basis);
+            // Error bodies are not kept (they may echo account details), so their identity stays empty.
+            var identity = ModelIdentity.FromApi(profile, sent is { Outcome: "received", StatusCode: < 400 } ? sent.Body : null, body);
+            return new(status, text, cost, reserve, basis, usage, identity);
+        }
         try { sent = await transport.SendAsync(profile, body, cancellation); }
         catch (OperationCanceledException) { Settle("unknown", "", reserve, "conservative_full_reservation: cancelled_in_flight", null);throw; }
         if (sent.Outcome != "received" || sent.Body is null) return Settle("unknown", "", reserve, "conservative_full_reservation: " + (sent.ErrorCode ?? "no_response"), null);
@@ -443,7 +469,30 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             .Select(x => $"{x.q.ReviewerId}: {(x.Item2 is null ? "결과 없음" : $"{x.Item2.ValidationState} ({x.Item2.ErrorCode})")}").ToList();
         var report = store.Artifacts(runId).FirstOrDefault(a => a.Path.EndsWith("report.md", StringComparison.Ordinal));
         return new(runId, run.Status, error, cost["usage_calculated_usd"]!.GetValue<decimal>(), cost["unknown_hold_usd"]!.GetValue<decimal>(),
-            ReviewEngine.CoverageFor(plan, units).ActualModelProcessingRatio, findings, notes, report is null ? null : Path.Combine(store.Root, report.Path));
+            ReviewEngine.CoverageFor(plan, units).ActualModelProcessingRatio, findings, notes, report is null ? null : Path.Combine(store.Root, report.Path), AttemptsFor(store, plan, runId));
+    }
+    // Every call of the run, retries and fallbacks included, with the model identity read from its saved answer.
+    // request_sha256 is left for the command that received the instruction to fill.
+    static System.Text.Json.Nodes.JsonArray AttemptsFor(StateStore store, Plan plan, string runId)
+    {
+        var list = new System.Text.Json.Nodes.JsonArray();
+        foreach (var a in store.Attempts(runId))
+        {
+            var request = plan.Requests.SingleOrDefault(q => q.Id == a.RequestId);if (request is null) continue;
+            var reviewer = plan.Reviewers.First(r => r.Id == request.ReviewerId);
+            string? body = null;
+            try { if (a.ResponsePath is string p && File.Exists(p)) body = Data.Read<SavedReply>(p).ProviderBody; }
+            catch (Exception e) when (e is ReviewError or IOException) { }
+            var identity = ModelIdentity.For(reviewer, body, request.Body);
+            ReviewerProfile? primary = request.FallbackFor is string f && plan.Requests.SingleOrDefault(q => q.Id == f) is { } pr ? plan.Reviewers.First(r => r.Id == pr.ReviewerId) : null;
+            ModelIdentity.Mark(identity, null, primary);
+            list.Add(new System.Text.Json.Nodes.JsonObject
+            {
+                ["attempt_id"] = a.Id, ["request_id"] = a.RequestId, ["unit_id"] = request.UnitId, ["reviewer"] = reviewer.Id, ["phase"] = a.Phase, ["error_code"] = a.ErrorCode,
+                ["fallback_used"] = primary is not null, ["model_identity"] = identity
+            });
+        }
+        return list;
     }
     public List<RunView> RecentRuns(int limit = 30)
     {

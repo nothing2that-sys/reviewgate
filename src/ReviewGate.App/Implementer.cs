@@ -26,7 +26,8 @@ namespace ReviewGate.App;
 //                  never set them.
 public record ImplementRequest(string Instruction, string Repository, ReviewerPick Worker, List<ReviewerPick> Reviewers, string? Base = null,
     string? ContinueBranch = null, List<string>? Checks = null, int? MaxMinutes = null, bool UseFallbacks = true, bool NoReview = false,
-    decimal? PersonReviewMaxUsd = null, List<string>? Files = null, List<string>? References = null, decimal? PersonWorkerMaxUsd = null);
+    decimal? PersonReviewMaxUsd = null, List<string>? Files = null, List<string>? References = null, decimal? PersonWorkerMaxUsd = null,
+    string? RequestSha256 = null);
 public record ImplementOutcome(int ExitCode, string Status, string? ErrorCode, string? RequiredAction, JsonObject Details);
 public delegate Task<TransportResult> WorkerRunner(string provider, CliJob job, int timeoutSeconds, CancellationToken cancellation);
 
@@ -179,6 +180,9 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
                 try { answer = await run(workerModel.Provider, new CliJob(WorkerSystem, prompt, WorkerSchema, workerModel.ModelId.StartsWith("default", StringComparison.Ordinal) ? null : workerModel.ModelId, wt, Edit: true), minutes * 60, ct); }
                 catch (ReviewError e) when (e.Code == "cli_not_found") { details["worker_result"] = new JsonObject { ["status"] = "not_started", ["error"] = e.Code }; return Done(11, "failed", e.Code, "install_or_sign_in_cli"); }
                 workerResult = WorkerView(answer);
+                var identity = ModelIdentity.FromCli(Data.Read<ReviewerProfile>(workerModel.File), answer.Outcome == "received" ? answer.Body : null,
+                    new JsonObject { ["system"] = WorkerSystem, ["prompt"] = prompt }.ToJsonString());
+                ModelIdentity.Mark(identity, q.RequestSha256);workerResult["model_identity"] = identity;
             }
             else
             {
@@ -309,7 +313,7 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
             {
                 ["status"] = result.Status, ["error"] = result.ErrorCode, ["run_id"] = result.RunId, ["plan"] = plan, ["report_path"] = result.ReportPath,
                 ["processing_ratio"] = result.ProcessingRatio, ["usage_calculated_usd"] = result.UsageUsd, ["unknown_hold_usd"] = result.UnknownHoldUsd,
-                ["unit_notes"] = Arr(result.UnitNotes),
+                ["unit_notes"] = Arr(result.UnitNotes), ["attempts"] = WithRequestHash(result.Attempts, q.RequestSha256),
                 ["findings"] = new JsonArray([.. result.Findings.Select(f => (JsonNode)new JsonObject
                 {
                     ["reviewer"] = f.Reviewer, ["kind"] = f.Kind, ["severity"] = f.Severity, ["location"] = f.Location, ["claim"] = f.Claim, ["detail"] = f.Detail, ["quote"] = f.Quote, ["evidence"] = f.Evidence
@@ -319,6 +323,13 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         catch (ReviewError e) { return new JsonObject { ["status"] = "failed", ["error"] = e.Code }; }
     }
 
+    // The instruction hash goes into every attempt's identity (the review instruction is ReviewGate's wrapping of it).
+    public static JsonArray WithRequestHash(JsonArray? attempts, string? requestSha256)
+    {
+        var copy = attempts?.DeepClone() as JsonArray ?? [];
+        foreach (var a in copy) if (a?["model_identity"] is JsonObject id) id["request_sha256"] = requestSha256;
+        return copy;
+    }
     static string Relative(string repo, string path)
     {
         string trimmed = path.Trim();
@@ -381,6 +392,8 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         };
         var job = await service.RunApiJobAsync(id, model, ApiWorkerSystem, prompt.ToString(), (JsonObject)JsonNode.Parse(EditSchema)!, cap, ct);
         result["cost_usd"] = job.CostUsd;result["reservation_usd"] = job.ReservationUsd;result["cost_basis"] = job.Basis;
+        var identity = job.Identity ?? ModelIdentity.FromApi(Data.Read<ReviewerProfile>(model.File), null, null);
+        ModelIdentity.Mark(identity, q.RequestSha256);result["model_identity"] = identity;
         result["usage"] = job.Usage is { } u ? new JsonObject { ["input_tokens"] = u.InputTokens, ["cached_input_tokens"] = u.CachedInputTokens, ["output_tokens"] = u.OutputTokens, ["thinking_tokens"] = u.ReasoningTokens } : null;
         if (job.Status != "success") { result["status"] = job.Status == "unknown" ? "unknown" : "failed";result["error"] = job.Status;return result; }
         JsonObject answer;

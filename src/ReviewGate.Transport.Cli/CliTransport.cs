@@ -17,9 +17,15 @@ namespace ReviewGate.Transport.Cli;
 // gets only file tools with edits auto-accepted, Codex runs with its shell tools turned off and the workspace-write
 // policy (its file patches stay in the folder), Antigravity runs in accept-edits mode, where a command request is
 // denied in headless mode (the turn then ends without an answer and the denial is reported).
-public sealed class CliTransport(Func<string, string?>? locate = null, Func<ProcessStartInfo, Process?>? start = null) : IModelTransport
+// Every answer also carries "model_identity": what the CLI itself recorded about the model that answered (Claude's
+// stream events, Codex's rollout file), the CLI version and the hash of the prompt text it was given. Nothing is
+// guessed: a value that could not be read stays empty (model_observed [], model_final null, source null).
+public sealed class CliTransport(Func<string, string?>? locate = null, Func<ProcessStartInfo, Process?>? start = null, Func<string, string?>? version = null) : IModelTransport
 {
-    public const int MaxOutputBytes = 8 * 1024 * 1024;
+    // Claude's stream-json output repeats every message (tool results included), so the cap is generous.
+    public const int MaxOutputBytes = 64 * 1024 * 1024;
+    // Codex keeps a rollout file per run (its model record); its memory features stay off so nothing from earlier runs is injected.
+    public static readonly string[] CodexNoMemory = ["--disable", "memories", "-c", "memories.use_memories=false", "-c", "memories.generate_memories=false"];
     public const string ReadOnlyTools = "Read,Grep,Glob", WebTools = "WebFetch,WebSearch", EditTools = "Read,Grep,Glob,Edit,Write";
     // Codex features that run commands or drive a browser/desktop; all are turned off for edit jobs.
     public static readonly string[] CodexNoCommandFeatures = ["shell_tool", "unified_exec", "browser_use", "computer_use", "in_app_browser"];
@@ -27,6 +33,25 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
     public static string AgyEditInstruction(string requestFile) => $"Read the task in \"{requestFile}\" and do exactly what it says. Edit files only inside the current workspace folder, never that task file. Do not run any command or use the web. Answer only with JSON matching the schema.";
     readonly Func<string, string?> locate = locate ?? DefaultLocate;
     readonly Func<ProcessStartInfo, Process?> start = start ?? Process.Start;
+    // With a substituted process starter (tests) no real "--version" is run unless one is given.
+    readonly Func<string, string?> version = version ?? (start is null ? CachedVersion : _ => null);
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> Versions = new(StringComparer.OrdinalIgnoreCase);
+    // "<cli> --version", first line, once per executable per process; null when it cannot be read in 20 seconds.
+    public static string? CachedVersion(string executable) => Versions.GetOrAdd(executable, exe =>
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, StandardOutputEncoding = Data.Utf8 };
+            psi.ArgumentList.Add("--version");
+            using var p = Process.Start(psi);if (p is null) return null;
+            p.StandardInput.Close();
+            var read = p.StandardOutput.ReadToEndAsync();_ = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(20_000)) { try { p.Kill(true); } catch (InvalidOperationException) { } return null; }
+            string first = read.Result.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
+            return first.Length is > 0 and <= 200 ? first : null;
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or AggregateException) { return null; }
+    });
 
     // Native executables only (never .cmd/.ps1 shims): PATH, then the CLIs' standard per-user install folders.
     public static string? DefaultLocate(string executable)
@@ -78,7 +103,7 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             switch (info.Id)
             {
                 case "claude-cli":
-                    foreach (var a in new[] { "-p", "--output-format", "json", "--json-schema", schema, "--tools", job.Web ? WebTools : job.Edit ? EditTools : project is null ? "" : ReadOnlyTools, "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
+                    foreach (var a in new[] { "-p", "--output-format", "stream-json", "--verbose", "--json-schema", schema, "--tools", job.Web ? WebTools : job.Edit ? EditTools : project is null ? "" : ReadOnlyTools, "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
                     if (job.Web) { psi.ArgumentList.Add("--allowedTools"); psi.ArgumentList.Add(WebTools); }
                     if (job.Edit) { psi.ArgumentList.Add("--permission-mode"); psi.ArgumentList.Add("acceptEdits"); }
                     if (model is not null) { psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(model); }
@@ -87,7 +112,8 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
                 case "codex-cli":
                     if (job.Web) psi.ArgumentList.Add("--search"); // a top-level option: it must come before "exec"
                     if (job.Edit) foreach (var f in CodexNoCommandFeatures) { psi.ArgumentList.Add("-c"); psi.ArgumentList.Add($"features.{f}=false"); }
-                    foreach (var a in new[] { "exec", "-", "-C", project ?? work, "--skip-git-repo-check", "--ephemeral", "--json", "--output-schema", schemaFile, "-o", outFile }) psi.ArgumentList.Add(a);
+                    foreach (var a in new[] { "exec", "-", "-C", project ?? work, "--skip-git-repo-check", "--json", "--output-schema", schemaFile, "-o", outFile }) psi.ArgumentList.Add(a);
+                    foreach (var a in CodexNoMemory) psi.ArgumentList.Add(a);
                     if (job.Edit) { psi.ArgumentList.Add("--sandbox"); psi.ArgumentList.Add("workspace-write"); }
                     if (model is not null) { psi.ArgumentList.Add("-m"); psi.ArgumentList.Add(model); }
                     stdin = system + "\n\n" + prompt;
@@ -133,6 +159,16 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             if (normalized is null) return TransportResult.Unknown(process.ExitCode == 0 ? "cli_unreadable_output" : "cli_failed");
             normalized["cli"] = info.Id;normalized["exit_code"] = process.ExitCode;
             if (normalized["status"]!.GetValue<string>() == "failed" && normalized["error"] is null) normalized["error"] = Classify(error ?? "");
+            // The prompt text exactly as the CLI received it: Claude gets the prompt on stdin (system text as an
+            // argument); Codex gets system and prompt together on stdin; agy reads both from its request file.
+            string sent = info.Id == "claude-cli" ? prompt : system + "\n\n" + prompt;
+            var seen = info.Id switch
+            {
+                "claude-cli" => ClaudeObservation(output),
+                "codex-cli" => CodexObservation(output, CodexHome()),
+                _ => new Observation([], null, null, null, null)
+            };
+            normalized["model_identity"] = Identity(info.Id, version(executable), model, seen, Data.Hash(sent));
             return new("received", 200, normalized.ToJsonString(), null);
         }
         finally { try { Directory.Delete(work, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
@@ -162,10 +198,81 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
         text.Contains("401", StringComparison.Ordinal) || text.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) || text.Contains("not logged in", StringComparison.OrdinalIgnoreCase) || text.Contains("authentication", StringComparison.OrdinalIgnoreCase) ? "unauthorized" :
         text.Contains("429", StringComparison.Ordinal) || text.Contains("rate limit", StringComparison.OrdinalIgnoreCase) || text.Contains("usage limit", StringComparison.OrdinalIgnoreCase) ? "rate_limited" : "error";
 
-    // claude -p --output-format json: one result object.
+    // What the CLI's own records say about the model: every model value read, the one that wrote the final answer,
+    // the reasoning effort, where it was read, and the id of this one call.
+    public sealed record Observation(List<string> Models, string? Final, string? Effort, JsonObject? Source, string? SessionId);
+    public static JsonObject Identity(string provider, string? cliVersion, string? requested, Observation seen, string sentPromptSha256) => new()
+    {
+        ["provider"] = provider, ["cli_version"] = cliVersion, ["model_requested"] = requested, ["effort_requested"] = null,
+        ["model_observed"] = new JsonArray([.. seen.Models.Select(m => (JsonNode)m)]), ["model_final"] = seen.Final, ["effort_observed"] = seen.Effort,
+        ["source"] = seen.Source, ["session_id"] = seen.SessionId, ["resumed"] = false, ["sent_prompt_sha256"] = sentPromptSha256
+    };
+    static IEnumerable<(int Line, JsonObject Event)> Lines(string text)
+    {
+        int n = 0;
+        foreach (var line in text.Split('\n'))
+        {
+            n++;
+            if (line.TrimStart().StartsWith('{') && ParseObject(line.Trim()) is { } o) yield return (n, o);
+        }
+    }
+    // Claude stream-json (stdout of this call): the final answer's model is the last assistant event's message.model;
+    // every model used is a key of the result event's modelUsage.
+    public static Observation ClaudeObservation(string stdout)
+    {
+        var events = Lines(stdout).ToList();
+        var last = events.LastOrDefault(e => e.Event["type"]?.GetValue<string>() == "assistant" && e.Event["message"]?["model"] is JsonValue);
+        var result = events.LastOrDefault(e => e.Event["type"]?.GetValue<string>() == "result").Event;
+        string? final = last.Event?["message"]?["model"]?.GetValue<string>();
+        var models = (result?["modelUsage"] as JsonObject)?.Select(x => x.Key).ToList() ?? [];
+        if (models.Count == 0 && final is not null) models = events.Where(e => e.Event["type"]?.GetValue<string>() == "assistant").Select(e => e.Event["message"]?["model"]?.GetValue<string>()).OfType<string>().Distinct().ToList();
+        string? session = result?["session_id"]?.GetValue<string>() ?? events.Select(e => e.Event["session_id"]?.GetValue<string>()).LastOrDefault(s => s is not null);
+        JsonObject? source = final is null ? null : new()
+        {
+            ["file"] = null, ["stream"] = "stdout", ["line"] = last.Line, ["field"] = "assistant.message.model",
+            ["observed_field"] = result?["modelUsage"] is JsonObject ? "result.modelUsage" : "assistant.message.model"
+        };
+        return new(models, final, null, source, session);
+    }
+    public static (string Home, string Label) CodexHome() => Environment.GetEnvironmentVariable("CODEX_HOME") is { Length: > 0 } env
+        ? (env, "$CODEX_HOME") : (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), "~/.codex");
+    // Codex: the thread id from "thread.started" names the rollout file (sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl);
+    // each turn_context line there records payload.model and payload.effort. Only paths, line numbers and those values are kept.
+    public static Observation CodexObservation(string stdout, (string Home, string Label) codex)
+    {
+        string? thread = Lines(stdout).Select(e => e.Event).FirstOrDefault(e => e["type"]?.GetValue<string>() == "thread.started")?["thread_id"]?.GetValue<string>();
+        if (thread is null || !System.Text.RegularExpressions.Regex.IsMatch(thread, "^[A-Za-z0-9-]{8,80}$")) return new([], null, null, null, null);
+        string sessions = Path.Combine(codex.Home, "sessions");
+        string[] found;
+        try { found = Directory.Exists(sessions) ? Directory.GetFiles(sessions, $"rollout-*-{thread}.jsonl", SearchOption.AllDirectories) : []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { found = []; }
+        if (found.Length != 1) return new([], null, null, null, thread);
+        var contexts = new List<(int Line, string? Model, string? Effort)>();
+        try
+        {
+            using var stream = new FileStream(found[0], FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Data.Utf8);
+            foreach (var (line, row) in Lines(reader.ReadToEnd()))
+                if (row["type"]?.GetValue<string>() == "turn_context" && row["payload"] is JsonObject p)
+                    contexts.Add((line, p["model"] is JsonValue m && m.TryGetValue(out string? ms) ? ms : null, p["effort"] is JsonValue f && f.TryGetValue(out string? fs) ? fs : null));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.DecoderFallbackException) { return new([], null, null, null, thread); }
+        var models = contexts.Select(c => c.Model).OfType<string>().Distinct().ToList();
+        if (models.Count == 0) return new([], null, null, null, thread);
+        var lastContext = contexts.Last(c => c.Model is not null);
+        var source = new JsonObject
+        {
+            ["file"] = codex.Label + "/" + Path.GetRelativePath(codex.Home, found[0]).Replace('\\', '/'), ["path"] = found[0],
+            ["line"] = lastContext.Line, ["lines"] = new JsonArray([.. contexts.Select(c => (JsonNode)c.Line)]), ["field"] = "turn_context.payload.model"
+        };
+        return new(models, lastContext.Model, lastContext.Effort, source, thread);
+    }
+
+    // claude -p --output-format stream-json --verbose: JSONL events ending with a result event (the same fields the
+    // single-object json output has). A single JSON object is still accepted.
     public static JsonObject? FromClaude(string stdout)
     {
-        if (ParseObject(stdout.Trim()) is not { } root) return null;
+        if ((ParseObject(stdout.Trim()) ?? Lines(stdout).Select(e => e.Event).LastOrDefault(e => e["type"]?.GetValue<string>() == "result")) is not { } root) return null;
         var u = root["usage"];
         bool ok = root["is_error"]?.GetValue<bool>() == false && root["subtype"]?.GetValue<string>() == "success";
         string? error = ok ? null : Number(root["api_error_status"]) switch { 401 or 403 => "unauthorized", 429 => "rate_limited", _ => Classify(root["result"]?.ToString() ?? "") };

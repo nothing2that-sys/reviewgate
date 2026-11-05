@@ -36,7 +36,7 @@ public sealed class ApiWorkerTests
             string text = System.Text.Json.JsonSerializer.Serialize(answer);
             var body = new JsonObject
             {
-                ["status"] = "completed",
+                ["id"] = "resp_test_1", ["model"] = "gpt-6-luna-2026-10-01", ["status"] = "completed",
                 ["output"] = new JsonArray(new JsonObject { ["type"] = "message", ["content"] = new JsonArray(new JsonObject { ["type"] = "output_text", ["text"] = text }) }),
                 ["usage"] = new JsonObject { ["input_tokens"] = 1200, ["output_tokens"] = 300, ["input_tokens_details"] = new JsonObject { ["cached_tokens"] = 0 }, ["output_tokens_details"] = new JsonObject { ["reasoning_tokens"] = 0 } }
             };
@@ -81,8 +81,14 @@ public sealed class ApiWorkerTests
     {
         using var r = new Repo();var api = new FakeOpenAi(Answer(Replace("src/Calc.cs", "=> a - b;", "=> a + b;"), Create("src/CalcTests.cs", "// tests\n")));
         var (impl, svc) = Desktop(r, api);
-        var outcome = await impl.RunAsync(new("Add must add.", r.Path, new("openai", null), [], NoReview: true, PersonReviewMaxUsd: 0m, Files: ["src"], PersonWorkerMaxUsd: 1m));
+        var outcome = await impl.RunAsync(new("Add must add.", r.Path, new("openai", null), [], NoReview: true, PersonReviewMaxUsd: 0m, Files: ["src"], PersonWorkerMaxUsd: 1m, RequestSha256: "abc123"));
         Assert.Equal("completed", outcome.Status);var w = outcome.Details["worker_result"]!;
+        // Who answered, as the response body says; the hashes of the instruction received and of the prompt sent.
+        var id = w["model_identity"]!;
+        Assert.Equal(("openai", "gpt-6-luna", "gpt-6-luna-2026-10-01", "resp_test_1"), (id["provider"]!.GetValue<string>(), id["model_requested"]!.GetValue<string>(), id["model_final"]!.GetValue<string>(), id["session_id"]!.GetValue<string>()));
+        Assert.Equal(["gpt-6-luna-2026-10-01"], id["model_observed"]!.AsArray().Select(x => x!.GetValue<string>()));Assert.Equal("model", id["source"]!["field"]!.GetValue<string>());
+        Assert.Equal("abc123", id["request_sha256"]!.GetValue<string>());Assert.False(id["fallback_used"]!.GetValue<bool>());
+        Assert.Equal(Data.Hash(api.Requests[0]["input"]!.GetValue<string>()), id["sent_prompt_sha256"]!.GetValue<string>());
         // One request with the folder's tracked file, not the rest of the repository.
         var sent = Assert.Single(api.Requests);string input = sent["input"]!.GetValue<string>();
         Assert.Contains("### src/Calc.cs", input);Assert.Contains("a - b", input);Assert.DoesNotContain("not for the model", input);Assert.False(sent["store"]!.GetValue<bool>());

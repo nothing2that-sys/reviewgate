@@ -22,7 +22,7 @@ static class Headless
         var picks = o.Many("reviewer").Select(ReviewerPick.Parse).ToList();
         Data.Require(picks.Count is 1 or 2, "reviewer_required");
         Data.Require(picks.All(p => p.Model != "*"), "reviewer_model_wildcard_not_allowed");
-        string instruction = await CliHost.InstructionAsync(o, ct);
+        var (instruction, requestSha256) = await CliHost.InstructionWithHashAsync(o, ct);
         string kind = o.One("profile") ?? "code";
         var preview = svc.PrepareReview(new(picks, instruction, o.Need("source-root"), o.Many("input"), o.Many("reference"), o.One("repository-root"), kind, !o.Has("no-fallback"), o.One("project")));
         var plan = new JsonObject
@@ -54,7 +54,8 @@ static class Headless
                 {
                     ["reviewer"] = f.Reviewer, ["kind"] = f.Kind, ["severity"] = f.Severity, ["location"] = f.Location, ["claim"] = f.Claim, ["detail"] = f.Detail,
                     ["quote"] = f.Quote, ["evidence"] = f.Evidence
-                })])
+                })]),
+                ["request_sha256"] = requestSha256, ["attempts"] = ReviewGate.App.Implementer.WithRequestHash(result.Attempts, requestSha256)
             }
         });
     }
@@ -64,11 +65,11 @@ static class Headless
     public static Implementer Implementer(string state) => new(Service(state), state, CliHost.WorkerFactory());
     public static async Task<CommandResult> ImplementAsync(CliHost.Options o, string state, CancellationToken ct)
     {
-        string instruction = await CliHost.InstructionAsync(o, ct);
+        var (instruction, requestSha256) = await CliHost.InstructionWithHashAsync(o, ct);
         var workers = o.Many("worker");Data.Require(workers.Count == 1, "worker_required");
         int? minutes = o.One("max-minutes") is string m ? int.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture, out var v) && v >= 1 ? v : throw new ReviewError(2, "invalid_max_minutes") : null;
         var request = new ImplementRequest(instruction, o.Need("repo"), ReviewerPick.Parse(workers[0]), o.Many("reviewer").Select(ReviewerPick.Parse).ToList(), o.One("base"), o.One("branch"),
-            o.Many("check"), minutes, !o.Has("no-fallback"), o.Has("no-review"), Files: o.Many("input"), References: o.Many("reference"));
+            o.Many("check"), minutes, !o.Has("no-fallback"), o.Has("no-review"), Files: o.Many("input"), References: o.Many("reference"), RequestSha256: requestSha256);
         var outcome = await Implementer(state).RunAsync(request, ct);
         return new(outcome.ExitCode, new Envelope
         {

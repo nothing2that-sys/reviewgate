@@ -149,10 +149,22 @@ public static class CliHost
     public static Func<ReviewGate.App.WorkerRunner?> WorkerFactory {get;set;}=()=>null;
     // Reviewer, review and price profiles ship next to the executable.
     public static string ProfilesRoot {get;set;}=Path.Combine(AppContext.BaseDirectory,"profiles");
-    public static async Task<string> InstructionAsync(Options o,CancellationToken ct)
+    public static async Task<string> InstructionAsync(Options o,CancellationToken ct)=>(await InstructionWithHashAsync(o,ct)).Text;
+    // The instruction and the SHA-256 of its bytes exactly as received: the --prompt-file bytes, the stdin bytes,
+    // or the UTF-8 of the argument (before any decoding or byte-order-mark handling).
+    public static async Task<(string Text,string Sha256)> InstructionWithHashAsync(Options o,CancellationToken ct)
     {
         int count=(o.Instruction is not null?1:0)+(o.Has("prompt-file")?1:0)+(o.Has("prompt-stdin")?1:0);Data.Require(count==1,"instruction_required_or_duplicated");
-        return o.Instruction??(o.One("prompt-file")is string pf?ReadInstruction(pf):await ReadStdin(ct));
+        byte[] bytes=o.Instruction is string arg?Data.Utf8.GetBytes(arg):o.One("prompt-file")is string pf?ReadInstructionBytes(pf):await ReadStdinBytes(ct);
+        string text;
+        if(o.Instruction is string a)text=a;
+        else if(o.Has("prompt-file"))
+        {
+            using var reader=new StreamReader(new MemoryStream(bytes),Data.Utf8,detectEncodingFromByteOrderMarks:true);
+            try{text=await reader.ReadToEndAsync(ct);}catch(DecoderFallbackException){throw new ReviewError(2,"invalid_utf8");}
+        }
+        else try{text=Data.Utf8.GetString(bytes);}catch(DecoderFallbackException){throw new ReviewError(2,"invalid_utf8");}
+        return(text,Data.Hash(bytes));
     }
     // Keys are typed by the user into this console only; they are never accepted from arguments, files,
     // environment variables or redirected stdin, and never echoed or returned.
@@ -218,12 +230,12 @@ public static class CliHost
             Details=new JsonObject{["grant_id"]=g.Id,["grant_file"]=file,["expires_at"]=g.ExpiresAt.ToString("O"),["max_usd"]=maxUsd,["reservation_upper_usd"]=reserve}});
     }
     static void CheckOutput(Options o,Plan p,string state){if(o.One("output")is string file)Data.Require(!SafePath.Within(file,p.SourceRoot)&&!SafePath.Within(file,state),"output_protected_overlap");}
-    static string ReadInstruction(string path){Data.Require(new FileInfo(path).Length<=1_048_576,"instruction_limit");return File.ReadAllText(path,Data.Utf8);}
-    static async Task<string> ReadStdin(CancellationToken parent)
+    static byte[] ReadInstructionBytes(string path){Data.Require(new FileInfo(path).Length<=1_048_576,"instruction_limit");return File.ReadAllBytes(path);}
+    static async Task<byte[]> ReadStdinBytes(CancellationToken parent)
     {
         using var cts=CancellationTokenSource.CreateLinkedTokenSource(parent);cts.CancelAfter(TimeSpan.FromSeconds(30));using var stream=Console.OpenStandardInput();using var output=new MemoryStream();byte[] buffer=new byte[8192];
         try{int n;while((n=await stream.ReadAsync(buffer,cts.Token))>0){Data.Require(output.Length+n<=1_048_576,"instruction_limit");output.Write(buffer,0,n);}}
         catch(OperationCanceledException)when(!parent.IsCancellationRequested){throw new ReviewError(2,"stdin_timeout");}
-        try{return Data.Utf8.GetString(output.ToArray());}catch(DecoderFallbackException){throw new ReviewError(2,"invalid_utf8");}
+        return output.ToArray();
     }
 }
