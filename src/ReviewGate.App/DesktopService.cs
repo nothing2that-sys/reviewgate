@@ -46,6 +46,9 @@ public record PriceStatus(string SnapshotId, DateTimeOffset EffectiveTo, int Day
     public string Text => Expired ? $"가격표가 만료되었습니다({EffectiveTo.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} KST). 유료 모델은 갱신 전까지 실행되지 않습니다." :
         $"가격표 {SnapshotId}{(UserApproved ? " (사용자 승인)" : "")} · {EffectiveTo.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} KST 만료 ({DaysLeft}일 남음)";
 }
+// One API worker call: answer status (success, truncated, refused, error, unknown, over_cost_cap), the answer text,
+// the settled cost, the reservation it was held against, how the cost was decided, and the reported usage.
+public record ApiJobResult(string Status, string Text, decimal CostUsd, decimal ReservationUsd, string Basis, Usage? Usage);
 public record RunView(string RunId, string Project, string Status, string? ErrorCode, DateTimeOffset Created, decimal UsageUsd, decimal UnknownHoldUsd);
 
 // Everything the desktop screens do, without any UI type. It drives the same planner, ledger, grant and engine
@@ -348,21 +351,62 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         var reasons = PolicyGate.Violations(policy, plan, store.Now, alsoAllowed);
         return reasons.Count > 0 ? (null, reasons) : (PolicyGate.Issue(store, policy!, plan, alsoAllowed), []);
     }
+    // ---- API implementation worker: one structured call outside review plans, on the live budget.
+    // The reservation (worst case for this request) must fit maxUsd, the run cap and the month cap. The call is
+    // settled from the provider's usage; an unknown outcome is settled at the full reservation.
+    public decimal ApiJobReservation(ModelOption model, string body)
+    {
+        var profile = Data.Read<ReviewerProfile>(model.File);var prices = MergedPrices().Snapshot;
+        var row = prices.Prices.SingleOrDefault(x => x.CanonicalModelKey == profile.CanonicalModelKey) ?? throw new ReviewError(12, "price_missing");
+        Data.Require(PriceRules.InWindow(prices, Now) || PriceRules.IsZero(row), "price_snapshot_expired", 12);
+        return WireAdapters.Reservation(profile, row, body);
+    }
+    public async Task<ApiJobResult> RunApiJobAsync(string implementId, ModelOption model, string system, string prompt, System.Text.Json.Nodes.JsonObject schema, decimal maxUsd, CancellationToken cancellation = default)
+    {
+        var profile = Data.Read<ReviewerProfile>(model.File);
+        string body = WireAdapters.BuildJob(profile, system, prompt, schema, "reviewgate_edits");
+        decimal reserve = ApiJobReservation(model, body);
+        var row = MergedPrices().Snapshot.Prices.Single(x => x.CanonicalModelKey == profile.CanonicalModelKey);
+        if (reserve > maxUsd) return new("over_cost_cap", "", 0, reserve, "not_sent", null);
+        var budget = Data.Read<BudgetPolicy>(Path.Combine(profilesRoot, "budget-live.json"));
+        using var transport = new HttpTransport(credentials, handler?.Invoke());
+        Data.Require(transport.HasCredential(profile.HostingProvider), "credential_missing", 11);
+        string id;
+        using (var store = Open()) { id = store.ReserveImplementCall(implementId, profile.HostingProvider, profile.CanonicalModelKey, reserve, budget);store.DispatchImplementCall(id); }
+        ApiJobResult Settle(string status, string text, decimal cost, string basis, Usage? usage)
+        { using var store = Open();store.SettleImplementCall(id, cost, basis);return new(status, text, cost, reserve, basis, usage); }
+        TransportResult sent;
+        try { sent = await transport.SendAsync(profile, body, cancellation); }
+        catch (OperationCanceledException) { Settle("unknown", "", reserve, "conservative_full_reservation: cancelled_in_flight", null);throw; }
+        if (sent.Outcome != "received" || sent.Body is null) return Settle("unknown", "", reserve, "conservative_full_reservation: " + (sent.ErrorCode ?? "no_response"), null);
+        try
+        {
+            var (status, text, usage) = WireAdapters.ReadJob(profile, sent.Body, sent.StatusCode);
+            if (usage.Known) return Settle(status, text, WireAdapters.Cost(usage, row), "provider_usage", usage);
+            // An HTTP error without usage is not billed; any other answer without usage is booked at the reservation.
+            return sent.StatusCode >= 400 ? Settle(status, text, 0, "http_error_no_usage", usage) : Settle(status, text, reserve, "conservative_full_reservation: usage_missing", usage);
+        }
+        catch (ReviewError e) { return Settle("error", "", reserve, "conservative_full_reservation: " + e.Code, null); }
+    }
+
     // ---- Implementation policy (see Implementer).
     public ImplementPolicy? ActiveImplementPolicy() { using var store = Open(); return store.ActiveImplementPolicy(); }
     public void IssueImplementPolicy(ImplementPolicy policy, string channel) { using var store = Open(); store.RecordImplementPolicy(policy, channel); }
     public bool RevokeImplementPolicy() { using var store = Open(); return store.RevokeImplementPolicies(); }
-    // Workers are CLI reviewers by another name: a provider alone means its default model in settings.
-    public ImplementPolicy DraftImplementPolicy(IReadOnlyList<string> repositories, IReadOnlyList<ReviewerPick> workers, IReadOnlyList<string> checks, int maxMinutes, int days)
+    // Workers are picked like reviewers: a provider alone means its default model in settings. API workers need a
+    // per-call cost cap (maxWorkerUsd); without any API worker it stays null.
+    public ImplementPolicy DraftImplementPolicy(IReadOnlyList<string> repositories, IReadOnlyList<ReviewerPick> workers, IReadOnlyList<string> checks, int maxMinutes, int days, decimal? maxWorkerUsd = null)
     {
         Data.Require(repositories.Count > 0 && workers.Count > 0 && maxMinutes is >= 1 and <= 240 && days is >= 1 and <= 365, "invalid_policy");
         Data.Require(checks.All(c => !string.IsNullOrWhiteSpace(c) && c.Length <= 400 && !c.Contains('\n') && !c.Contains('\r')), "invalid_policy");
         var repos = repositories.Select(r => Path.GetFullPath(r).TrimEnd(Path.DirectorySeparatorChar)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         Data.Require(repos.All(Directory.Exists), "input_unavailable");
-        Data.Require(workers.All(w => ProviderCatalog.Get(w.Provider).IsCli && w.Model != "*"), "worker_must_be_cli");
+        Data.Require(workers.All(w => w.Model != "*"), "invalid_worker");
+        bool api = workers.Any(w => !ProviderCatalog.Get(w.Provider).IsCli);
+        Data.Require(maxWorkerUsd is null or >= 0, "invalid_policy");
         var allowed = workers.Select(w => ResolveReviewers([w], false)[0].Primary).DistinctBy(m => m.Id)
             .Select(m => new AllowedReviewer(Path.GetFileNameWithoutExtension(m.File), m.CanonicalModelKey)).ToList();
-        return new(Data.Version, Data.Id("ipolicy"), Now, Now.AddDays(days), repos, allowed, checks.Select(c => c.Trim()).Distinct().ToList(), maxMinutes);
+        return new(Data.Version, Data.Id("ipolicy"), Now, Now.AddDays(days), repos, allowed, checks.Select(c => c.Trim()).Distinct().ToList(), maxMinutes, api ? maxWorkerUsd ?? 1m : null);
     }
     public async Task<QuickResult> RunAsync(string planId, Grant grant, CancellationToken cancellation = default)
     {

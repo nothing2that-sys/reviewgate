@@ -38,6 +38,7 @@ public sealed class StateStore : IDisposable
           CREATE TABLE IF NOT EXISTS bundles(run_id TEXT PRIMARY KEY REFERENCES runs(id),json TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS grant_issuance(grant_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL REFERENCES plans(id),hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS standing_policy(id TEXT PRIMARY KEY,json TEXT NOT NULL,hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL,revoked_at TEXT);
+          CREATE TABLE IF NOT EXISTS implement_calls(id TEXT PRIMARY KEY,implement_id TEXT NOT NULL,provider TEXT NOT NULL,model_key TEXT NOT NULL,phase TEXT NOT NULL,reservation TEXT NOT NULL,cost TEXT,month TEXT NOT NULL,basis TEXT,created TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS implement_policy(id TEXT PRIMARY KEY,json TEXT NOT NULL,hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL,revoked_at TEXT);
           """);
         Data.Require(Scalar("PRAGMA foreign_keys;")=="1","state_store_corrupt",13);
@@ -151,7 +152,7 @@ public sealed class StateStore : IDisposable
         var projectRuns=RunIdsForProject(plan.ProjectId,tx);
         Data.Require(all.Where(a=>projectRuns.Contains(a.RunId)).Sum(Held)+amount<=plan.Budget.ProjectUsd
             &&runAttempts.Sum(Held)+amount<=plan.Budget.RunUsd&&grantAttempts.Sum(Held)+amount<=grant.MaxUsd
-            &&all.Where(a=>a.Month==month||IsHeld(a.Phase)).Sum(Held)+amount<=plan.Budget.MonthUsd,"budget_exhausted",12);
+            &&all.Where(a=>a.Month==month||IsHeld(a.Phase)).Sum(Held)+ImplementHeld(month,tx)+amount<=plan.Budget.MonthUsd,"budget_exhausted",12);
         var row=new AttemptRow(Data.Id("attempt"),run.Id,request.Id,grant.Id,"reserved",amount,null,month,null,null,null);
         Exec("INSERT INTO attempts VALUES($i,$r,$q,$g,'reserved',$a,NULL,$m,NULL,NULL,NULL)",tx,("$i",row.Id),("$r",row.RunId),("$q",row.RequestId),("$g",row.GrantId),("$a",Money(amount)),("$m",month));
         Event(row.Id,"reserve",amount,Namespace+"_bound",tx);tx.Commit();return row;
@@ -199,8 +200,43 @@ public sealed class StateStore : IDisposable
         string? json=Scalar("SELECT json FROM implement_policy WHERE revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1");
         if(json is null)return null;
         var p=Data.Parse<ImplementPolicy>(json);
-        Data.Require(Scalar("SELECT hash FROM implement_policy WHERE id=$i",null,("$i",p.Id))==Data.Hash(Data.Json(p)),"state_store_corrupt",13);
+        Data.Require(Scalar("SELECT hash FROM implement_policy WHERE id=$i",null,("$i",p.Id))==Data.Hash(json),"state_store_corrupt",13);
         return p;
+    }
+    // API implementation workers: one model call per run, outside review plans. It is reserved against the same
+    // live budget (one run's cap, the month's cap shared with reviews), dispatched, then settled from the reported
+    // usage. A call whose outcome is unknown is settled at its full reservation (no later reconciliation).
+    public string ReserveImplementCall(string implementId,string provider,string modelKey,decimal amount,BudgetPolicy budget)
+    {
+        Data.Require(Namespace=="live","policy_is_live_only");ValidId(implementId);Data.Require(amount>=0,"invalid_reservation");
+        using var tx=db.BeginTransaction();string month=Month(Now);
+        decimal reviews=Attempts(null,tx).Where(a=>a.Month==month||IsHeld(a.Phase)).Sum(Held);
+        Data.Require(amount<=budget.RunUsd&&reviews+ImplementHeld(month,tx)+amount<=budget.MonthUsd,"budget_exhausted",12);
+        string id=Data.Id("icall");
+        Exec("INSERT INTO implement_calls VALUES($i,$m,$p,$k,'reserved',$a,NULL,$mo,NULL,$t)",tx,("$i",id),("$m",implementId),("$p",provider),("$k",modelKey),("$a",Money(amount)),("$mo",month),("$t",Now.ToString("O")));
+        tx.Commit();return id;
+    }
+    public void DispatchImplementCall(string id)=>Data.Require(Exec("UPDATE implement_calls SET phase='dispatched',month=$m WHERE id=$i AND phase='reserved'",null,("$i",id),("$m",Month(Now)))==1,"invalid_request_transition",13);
+    public void SettleImplementCall(string id,decimal cost,string basis)=>
+        Data.Require(cost>=0&&Exec("UPDATE implement_calls SET phase='settled',cost=$c,basis=$b WHERE id=$i AND phase IN ('reserved','dispatched')",null,("$i",id),("$c",Money(cost)),("$b",basis))==1,"invalid_request_transition",13);
+    // Settled calls count their cost in their month; calls not yet settled hold their reservation.
+    public decimal ImplementHeld(string month,SqliteTransaction? tx=null)
+    {
+        using var c=Cmd("SELECT phase,reservation,cost,month FROM implement_calls",tx);using var r=c.ExecuteReader();decimal held=0;
+        while(r.Read())
+        {
+            decimal reservation=decimal.Parse(r.GetString(1),CultureInfo.InvariantCulture);
+            if(r.GetString(0)=="settled"){if(r.GetString(3)==month)held+=decimal.Parse(r.GetString(2),CultureInfo.InvariantCulture);}
+            else held+=reservation;
+        }
+        return held;
+    }
+    public List<(string Id,string Phase,decimal Reservation,decimal? Cost,string Basis)> ImplementCalls(string implementId)
+    {
+        using var c=Cmd("SELECT id,phase,reservation,cost,basis FROM implement_calls WHERE implement_id=$m ORDER BY created",null,("$m",implementId));using var r=c.ExecuteReader();
+        var rows=new List<(string,string,decimal,decimal?,string)>();
+        while(r.Read())rows.Add((r.GetString(0),r.GetString(1),decimal.Parse(r.GetString(2),CultureInfo.InvariantCulture),r.IsDBNull(3)?null:decimal.Parse(r.GetString(3),CultureInfo.InvariantCulture),r.IsDBNull(4)?"":r.GetString(4)));
+        return rows;
     }
     public bool RevokeImplementPolicies()=>Exec("UPDATE implement_policy SET revoked_at=$t WHERE revoked_at IS NULL",null,("$t",Now.ToString("O")))>0;
     public bool IsGrantIssued(Grant g)=>Scalar("SELECT hash FROM grant_issuance WHERE grant_id=$g",null,("$g",g.Id))==Data.Hash(Data.Json(g));

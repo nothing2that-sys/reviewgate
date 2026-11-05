@@ -68,7 +68,7 @@ static class Headless
         var workers = o.Many("worker");Data.Require(workers.Count == 1, "worker_required");
         int? minutes = o.One("max-minutes") is string m ? int.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture, out var v) && v >= 1 ? v : throw new ReviewError(2, "invalid_max_minutes") : null;
         var request = new ImplementRequest(instruction, o.Need("repo"), ReviewerPick.Parse(workers[0]), o.Many("reviewer").Select(ReviewerPick.Parse).ToList(), o.One("base"), o.One("branch"),
-            o.Many("check"), minutes, !o.Has("no-fallback"), o.Has("no-review"));
+            o.Many("check"), minutes, !o.Has("no-fallback"), o.Has("no-review"), Files: o.Many("input"), References: o.Many("reference"));
         var outcome = await Implementer(state).RunAsync(request, ct);
         return new(outcome.ExitCode, new Envelope
         {
@@ -112,11 +112,13 @@ static class Headless
         if (o.Instruction == "set-implement")
         {
             int minutes = o.One("max-minutes") is string mm ? int.TryParse(mm, NumberStyles.None, CultureInfo.InvariantCulture, out var x) ? x : throw new ReviewError(2, "invalid_policy") : 30;
-            var ip = svc.DraftImplementPolicy(o.Many("allow-repo"), o.Many("worker").Select(ReviewerPick.Parse).ToList(), o.Many("check"), minutes, days);
+            decimal? workerUsd = o.One("max-usd") is string mu ? decimal.TryParse(mu, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var wu) && wu >= 0 ? wu : throw new ReviewError(2, "invalid_policy") : null;
+            var ip = svc.DraftImplementPolicy(o.Many("allow-repo"), o.Many("worker").Select(ReviewerPick.Parse).ToList(), o.Many("check"), minutes, days, workerUsd);
             e.WriteLine("ReviewGate implementation policy — agents may have a CLI worker change these repositories without asking each time.");
             e.WriteLine("Each run works on a new branch reviewgate/impl-* in a separate worktree; the worker can edit files but not run commands; nothing is merged.");
             foreach (var repo in ip.Repositories) e.WriteLine($"  repository  {repo}");
-            foreach (var w in ip.Workers) e.WriteLine($"  worker      {w.Id}  ({w.CanonicalModelKey}) — signed-in CLI account, repository content is sent to it");
+            foreach (var w in ip.Workers) e.WriteLine($"  worker      {w.Id}  ({w.CanonicalModelKey}) — " + (w.Id.EndsWith("-cli", StringComparison.Ordinal) ? "signed-in CLI account; repository content is sent to it" : "API key; the files named in each call are sent to it"));
+            if (ip.MaxWorkerUsd is decimal cap) e.WriteLine($"  API worker  at most {cap.ToString(CultureInfo.InvariantCulture)} USD reserved per call; budget-live.json caps still apply");
             foreach (var c in ip.Checks) e.WriteLine($"  check       {c}   (run by ReviewGate in the worktree; it executes the changed code)");
             if (ip.Checks.Count == 0) e.WriteLine("  check       none");
             e.WriteLine($"  time        at most {ip.MaxMinutes} minutes per worker run (and per check)");

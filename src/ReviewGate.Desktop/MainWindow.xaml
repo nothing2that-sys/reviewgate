@@ -170,8 +170,23 @@
                             </DockPanel>
                             <TextBlock Text="추가 지시 (선택 — 파일이 없으면 여기에만 써도 됨)" Style="{StaticResource Hint}" />
                             <TextBox x:Name="ImplInstruction" Height="70" TextWrapping="Wrap" AcceptsReturn="True" Margin="0,4" VerticalScrollBarVisibility="Auto" />
-                            <TextBlock Text="작업자 (구현할 CLI — 파일 편집만, 명령 실행 불가)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <TextBlock Text="작업자 (명령 실행 불가)" FontWeight="SemiBold" Margin="0,8,0,0" />
                             <ComboBox x:Name="ImplWorker" DisplayMemberPath="Label" Margin="0,4" />
+                            <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                                       Text="CLI는 저장소를 직접 읽고 고칩니다. API 모델(OpenAI·Together·Google)은 아래 '고칠 파일·폴더'의 내용만 보고 수정안을 답하며, ReviewGate가 그대로 적용합니다." />
+                            <TextBlock Text="고칠 파일·폴더 (한 줄에 하나, API 작업자는 필수)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <DockPanel Margin="0,4">
+                                <StackPanel DockPanel.Dock="Right" Margin="4,0,0,0">
+                                    <Button Content="파일" Click="OnAddImplFile" MinWidth="50" Margin="0,0,0,2" />
+                                    <Button Content="폴더" Click="OnAddImplFolder" MinWidth="50" />
+                                </StackPanel>
+                                <TextBox x:Name="ImplFiles" Height="50" AcceptsReturn="True" FontFamily="Consolas" VerticalScrollBarVisibility="Auto" />
+                            </DockPanel>
+                            <TextBlock Text="참고 파일 (읽기만, 선택)" FontWeight="SemiBold" Margin="0,4,0,0" />
+                            <DockPanel Margin="0,4">
+                                <Button DockPanel.Dock="Right" Content="파일" Click="OnAddImplReference" Margin="4,0,0,0" MinWidth="50" />
+                                <TextBox x:Name="ImplReferences" Height="36" AcceptsReturn="True" FontFamily="Consolas" VerticalScrollBarVisibility="Auto" />
+                            </DockPanel>
                             <TextBlock Text="교차 검수자 (작업자와 다른 모델)" FontWeight="SemiBold" Margin="0,8,0,0" />
                             <ComboBox x:Name="ImplReviewerA" DisplayMemberPath="Label" Margin="0,4" />
                             <ComboBox x:Name="ImplReviewerB" DisplayMemberPath="Label" Margin="0,4" />
@@ -181,8 +196,12 @@
                             <StackPanel Orientation="Horizontal" Margin="0,4">
                                 <TextBlock Text="시간 상한(분) " VerticalAlignment="Center" />
                                 <TextBox x:Name="ImplMinutes" Width="50" Text="30" />
-                                <TextBlock Text="   검수 비용 상한(USD) " VerticalAlignment="Center" />
-                                <TextBox x:Name="ImplReviewUsd" Width="60" Text="1" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,4">
+                                <TextBlock Text="비용 상한(USD)  API 작업자 " VerticalAlignment="Center" />
+                                <TextBox x:Name="ImplWorkerUsd" Width="50" Text="0.5" />
+                                <TextBlock Text="   교차 검수 " VerticalAlignment="Center" />
+                                <TextBox x:Name="ImplReviewUsd" Width="50" Text="1" />
                             </StackPanel>
                             <TextBlock Text="이어서 고칠 브랜치 (비우면 현재 HEAD에서 새 브랜치)" FontWeight="SemiBold" Margin="0,8,0,0" />
                             <TextBox x:Name="ImplContinueBranch" Margin="0,4" FontFamily="Consolas" />

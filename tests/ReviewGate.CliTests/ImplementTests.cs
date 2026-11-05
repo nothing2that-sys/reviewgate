@@ -148,7 +148,7 @@ public sealed class ImplementTests
         Assert.Contains(reasons, v => v.StartsWith("worker_not_allowed: codex-cli", StringComparison.Ordinal));
         Assert.Contains(reasons, v => v.StartsWith("reviewer_same_as_worker: codex-cli", StringComparison.Ordinal));
         Assert.Contains("check_not_allowed: del /q *.*", reasons);Assert.Contains(reasons, v => v.StartsWith("over_time_cap: 99 > 10", StringComparison.Ordinal));
-        Assert.Equal("worker_must_be_cli", (await Implement(r, new FakeWorker(ToTwo), "--worker", "openai", "--no-review")).Result.Result.ErrorCode);
+        Assert.Equal("files_required_for_api_worker", (await Implement(r, new FakeWorker(ToTwo), "--worker", "openai", "--no-review")).Result.Result.ErrorCode);
         Assert.Equal("reviewer_required", (await Implement(r, new FakeWorker(ToTwo), "--worker", "claude-cli")).Result.Result.ErrorCode);
         Assert.Equal("invalid_implement_options", (await Implement(r, new FakeWorker(ToTwo), "--worker", "claude-cli", "--no-review", "--source-root", r.Path)).Result.Result.ErrorCode);
         // Policies for another folder do not cover this repository.
@@ -190,7 +190,9 @@ public sealed class ImplementTests
         Assert.True(status.Details!["implement"]!["active"]!.GetValue<bool>());Assert.True(status.Details["review"]!["active"]!.GetValue<bool>());
         var revoked = Data.Parse<Envelope>((await TestEnvironment.Invoke(["policy", "revoke", "--state-root", r.Env.State])).Stdout);
         Assert.Equal("revoked", revoked.Status);Assert.Null(store.ActiveImplementPolicy());Assert.Null(store.ActivePolicy());
-        Assert.Equal("worker_must_be_cli", Assert.Throws<ReviewError>(() => Service(r.Env).DraftImplementPolicy([r.Path], [new("openai", null)], [], 10, 30)).Code);
+        // An API worker gets a per-call cost cap (default 1 USD); CLI-only policies have none.
+        Assert.Equal(1m, Service(r.Env).DraftImplementPolicy([r.Path], [new("openai", null)], [], 10, 30).MaxWorkerUsd);
+        Assert.Null(Service(r.Env).DraftImplementPolicy([r.Path], [new("codex-cli", null)], [], 10, 30).MaxWorkerUsd);
     }
 
     // ---- The desktop app: a person confirms the run there, so no standing policy is consulted.

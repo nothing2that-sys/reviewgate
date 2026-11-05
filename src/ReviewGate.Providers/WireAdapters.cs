@@ -37,13 +37,21 @@ public static class WireAdapters
         if(ProviderCatalog.Get(r.HostingProvider).IsCli)
             // Agent CLIs take the system text, the request and the schema; the CLI transport turns this into a command line.
             body=new(){["cli"]=r.HostingProvider,["model"]=UsesCliDefaultModel(r)?null:r.ModelId,["workdir"]=workingDirectory,["system"]=workingDirectory is null?SystemInstruction:CliSystemInstruction,["prompt"]=sourcePayload,["schema"]=PayloadSchema()};
-        else if(r.HostingProvider=="openai") body=new(){["model"]=r.ModelId,["store"]=false,["instructions"]=SystemInstruction,["input"]=sourcePayload,["max_output_tokens"]=r.MaxOutputTokens,
-            ["text"]=new JsonObject{["format"]=new JsonObject{["type"]="json_schema",["name"]="reviewgate_findings",["strict"]=true,["schema"]=PayloadSchema()}}};
-        else if(r.HostingProvider=="together") body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=SystemInstruction},new JsonObject{["role"]="user",["content"]=sourcePayload}),
-            ["max_tokens"]=r.MaxOutputTokens,["response_format"]=new JsonObject{["type"]="json_schema",["json_schema"]=new JsonObject{["name"]="reviewgate_findings",["schema"]=PayloadSchema()}}};
-        else body=new(){["model"]=r.ModelId,["store"]=false,["system_instruction"]=SystemInstruction,["input"]=sourcePayload,
+        else return BuildJob(r,SystemInstruction,sourcePayload,PayloadSchema(),"reviewgate_findings");
+        string json=body.ToJsonString();Data.Require(Data.Utf8.GetByteCount(json)<=r.MaxRequestBytes,"request_context_exceeded",12);return json;
+    }
+    // Any structured job for an API model (reviews, implementation workers): system text, user text, the JSON schema
+    // the answer must follow and its name. Same endpoints, storage flags, limits and reasoning settings as a review.
+    public static string BuildJob(ReviewerProfile r,string system,string prompt,JsonObject schema,string schemaName)
+    {
+        Validate(r);Data.Require(!ProviderCatalog.Get(r.HostingProvider).IsCli,"unsupported_capability",14);JsonObject body;
+        if(r.HostingProvider=="openai") body=new(){["model"]=r.ModelId,["store"]=false,["instructions"]=system,["input"]=prompt,["max_output_tokens"]=r.MaxOutputTokens,
+            ["text"]=new JsonObject{["format"]=new JsonObject{["type"]="json_schema",["name"]=schemaName,["strict"]=true,["schema"]=schema}}};
+        else if(r.HostingProvider=="together") body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=system},new JsonObject{["role"]="user",["content"]=prompt}),
+            ["max_tokens"]=r.MaxOutputTokens,["response_format"]=new JsonObject{["type"]="json_schema",["json_schema"]=new JsonObject{["name"]=schemaName,["schema"]=schema}}};
+        else body=new(){["model"]=r.ModelId,["store"]=false,["system_instruction"]=system,["input"]=prompt,
             ["generation_config"]=new JsonObject{["max_output_tokens"]=r.MaxOutputTokens},
-            ["response_format"]=new JsonObject{["type"]="text",["mime_type"]="application/json",["schema"]=PayloadSchema()}};
+            ["response_format"]=new JsonObject{["type"]="text",["mime_type"]="application/json",["schema"]=schema}};
         if(r.ReasoningEffort is string effort)
         {
             if(r.HostingProvider=="openai")body["reasoning"]=new JsonObject{["effort"]=effort};
@@ -110,37 +118,7 @@ public static class WireAdapters
                 if(root["structured_output"] is not JsonObject structured)return new(InvalidPayload,"not_reported",[],usage);
                 text=structured.ToJsonString();
             }
-            else if(reviewer.HostingProvider=="openai")
-            {
-                // completed | incomplete (max_output_tokens → truncated, content_filter → refused) | failed/cancelled/other → error
-                string? state=root["status"]?.GetValue<string>();
-                if(state=="incomplete")status=root["incomplete_details"]?["reason"]?.GetValue<string>()=="content_filter"?"refused":"truncated";
-                else if(state!="completed")status="error";
-                foreach(var output in root["output"]?.AsArray()??throw new ReviewError(21,"invalid_provider_shape"))
-                {
-                    if(output?["type"]?.GetValue<string>()!="message")continue;
-                    foreach(var c in output["content"]?.AsArray()??[])
-                    {if(c?["type"]?.GetValue<string>()=="refusal"&&status=="success")status="refused";else if(c?["type"]?.GetValue<string>()=="output_text")text+=c["text"]?.GetValue<string>();}
-                }
-            }
-            else if(reviewer.HostingProvider=="together")
-            {
-                var choice=root["choices"]?[0]??throw new ReviewError(21,"invalid_provider_shape");
-                var finish=choice["finish_reason"]?.GetValue<string>();
-                // Documented values: stop, eos (both normal ends), length, tool_calls, function_call.
-                status=finish is "stop" or "eos"?"success":finish=="content_filter"?"refused":finish=="length"?"truncated":"error";
-                Data.Require(choice["message"]?["tool_calls"] is null,"unexpected_tool_call",21);
-                text=choice["message"]?["content"]?.GetValue<string>()??"";
-            }
-            else
-            {
-                // completed | incomplete → truncated | failed, cancelled, in_progress, requires_* → error
-                string? state=root["status"]?.GetValue<string>();
-                if(state=="incomplete")status="truncated";else if(state!="completed")status="error";
-                foreach(var step in root["steps"]?.AsArray()??throw new ReviewError(21,"invalid_provider_shape"))
-                    if(step?["type"]?.GetValue<string>()=="model_output")foreach(var c in step["content"]?.AsArray()??[])
-                    {if(c?["type"]?.GetValue<string>()=="text")text+=c["text"]?.GetValue<string>();else if(c?["type"]?.GetValue<string>()=="refusal"&&status=="success")status="refused";}
-            }
+            else (status,text)=ApiText(reviewer.HostingProvider,root);
             if(status!="success")return new(status,"not_reported",[],usage);
             // The provider envelope (and its usage) is valid here; a model payload that breaks the
             // reviewer contract is an invalid result with known usage, not an unknown dispatch.
@@ -161,7 +139,58 @@ public static class WireAdapters
         catch(Exception e)when(e is JsonException or InvalidOperationException or FormatException or IndexOutOfRangeException or KeyNotFoundException)
         {throw new ReviewError(21,"invalid_provider_shape");}
     }
-    static Usage ReadUsage(string provider,JsonNode? u)
+    // The model's answer text and its status (success, truncated, refused, error) from an API provider's envelope.
+    static (string Status,string Text) ApiText(string provider,JsonNode root)
+    {
+        string text="";string status="success";
+        if(provider=="openai")
+        {
+            // completed | incomplete (max_output_tokens → truncated, content_filter → refused) | failed/cancelled/other → error
+            string? state=root["status"]?.GetValue<string>();
+            if(state=="incomplete")status=root["incomplete_details"]?["reason"]?.GetValue<string>()=="content_filter"?"refused":"truncated";
+            else if(state!="completed")status="error";
+            foreach(var output in root["output"]?.AsArray()??throw new ReviewError(21,"invalid_provider_shape"))
+            {
+                if(output?["type"]?.GetValue<string>()!="message")continue;
+                foreach(var c in output["content"]?.AsArray()??[])
+                {if(c?["type"]?.GetValue<string>()=="refusal"&&status=="success")status="refused";else if(c?["type"]?.GetValue<string>()=="output_text")text+=c["text"]?.GetValue<string>();}
+            }
+        }
+        else if(provider=="together")
+        {
+            var choice=root["choices"]?[0]??throw new ReviewError(21,"invalid_provider_shape");
+            var finish=choice["finish_reason"]?.GetValue<string>();
+            // Documented values: stop, eos (both normal ends), length, tool_calls, function_call.
+            status=finish is "stop" or "eos"?"success":finish=="content_filter"?"refused":finish=="length"?"truncated":"error";
+            Data.Require(choice["message"]?["tool_calls"] is null,"unexpected_tool_call",21);
+            text=choice["message"]?["content"]?.GetValue<string>()??"";
+        }
+        else
+        {
+            // completed | incomplete → truncated | failed, cancelled, in_progress, requires_* → error
+            string? state=root["status"]?.GetValue<string>();
+            if(state=="incomplete")status="truncated";else if(state!="completed")status="error";
+            foreach(var step in root["steps"]?.AsArray()??throw new ReviewError(21,"invalid_provider_shape"))
+                if(step?["type"]?.GetValue<string>()=="model_output")foreach(var c in step["content"]?.AsArray()??[])
+                {if(c?["type"]?.GetValue<string>()=="text")text+=c["text"]?.GetValue<string>();else if(c?["type"]?.GetValue<string>()=="refusal"&&status=="success")status="refused";}
+        }
+        return (status,text);
+    }
+    // A structured job's answer: status, the JSON text, usage. HTTP errors carry no answer.
+    public static (string Status,string Text,Usage Usage) ReadJob(ReviewerProfile reviewer,string json,int httpStatus=200)
+    {
+        try
+        {
+            var root=JsonNode.Parse(json)??throw new ReviewError(21,"invalid_provider_json");
+            var usage=ReadUsage(reviewer.HostingProvider,root["usage"]);
+            if(httpStatus>=400)return(httpStatus is 401 or 403?"unauthorized":httpStatus==429?"rate_limited":"error","",usage);
+            var (status,text)=ApiText(reviewer.HostingProvider,root);
+            return(status,text,usage);
+        }
+        catch(Exception e)when(e is JsonException or InvalidOperationException or FormatException or IndexOutOfRangeException or KeyNotFoundException)
+        {throw new ReviewError(21,"invalid_provider_shape");}
+    }
+    public static Usage ReadUsage(string provider,JsonNode? u)
     {
         if(u is null)return new(0,0,Known:false);
         static long Value(JsonNode? n)=>n?.GetValue<long>()??0;

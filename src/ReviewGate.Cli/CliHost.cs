@@ -40,11 +40,11 @@ public static class CliHost
         if(o.Command=="policy")Data.Require(o.Instruction switch
             {
                 "set"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-root" or "reviewer" or "max-usd" or "max-requests" or "expires-days" or "output")),
-                "set-implement"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-repo" or "worker" or "check" or "max-minutes" or "expires-days" or "output")),
+                "set-implement"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-repo" or "worker" or "check" or "max-minutes" or "max-usd" or "expires-days" or "output")),
                 "status" or "revoke"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "output")),
                 _=>false
             },"invalid_policy_command");
-        if(o.Command=="implement")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "repo" or "base" or "branch" or "worker" or "reviewer" or "check" or "max-minutes" or "no-review" or "no-fallback" or "prompt-file" or "prompt-stdin" or "output")),"invalid_implement_options");
+        if(o.Command=="implement")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "repo" or "base" or "branch" or "worker" or "reviewer" or "check" or "max-minutes" or "no-review" or "no-fallback" or "prompt-file" or "prompt-stdin" or "output" or "input" or "reference")),"invalid_implement_options");
         if(o.Command=="discard")Data.Require(o.Instruction is null&&!o.Items.Keys.Any(k=>k is not ("state-root" or "repo" or "branch" or "output")),"invalid_discard_options");
         if(o.Has("config"))
         {

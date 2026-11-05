@@ -268,7 +268,7 @@ public partial class MainWindow : Window
     List<FindingView> implFindings = [];
     void RefreshImplementChoices(List<ReviewerChoice> choices)
     {
-        var workers = choices.Where(c => ProviderCatalog.Get(c.Provider).IsCli).ToList();
+        var workers = choices.OrderBy(c => ProviderCatalog.Get(c.Provider).IsCli ? 0 : 1).ToList();
         object? keepWorker = ImplWorker.SelectedItem;ImplWorker.ItemsSource = workers;
         ImplWorker.SelectedItem = workers.FirstOrDefault(c => c.Provider == (keepWorker as ReviewerChoice)?.Provider) ?? workers.FirstOrDefault(c => c.Provider == "codex-cli") ?? workers.FirstOrDefault();
         var first = new List<ReviewerChoice> { new("(없음 — 교차 검수 안 함)", "", null, null) };first.AddRange(choices);
@@ -278,6 +278,30 @@ public partial class MainWindow : Window
     }
     void OnPickRepo(object sender, RoutedEventArgs e)
     { var dialog = new OpenFolderDialog { Title = "구현할 git 저장소 (루트 폴더)" };if (dialog.ShowDialog(this) == true) ImplRepo.Text = dialog.FolderName; }
+    static void AppendLine(TextBox box, string line) => box.Text = (box.Text.TrimEnd().Length > 0 ? box.Text.TrimEnd() + "\n" : "") + line;
+    string? InRepo(string path)
+    {
+        if (string.IsNullOrWhiteSpace(ImplRepo.Text)) { Say("저장소 폴더를 먼저 고르세요.");return null; }
+        string repo = Path.GetFullPath(ImplRepo.Text.Trim()), full = Path.GetFullPath(path);
+        if (!full.StartsWith(repo.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) { Say("저장소 안의 파일·폴더만 고를 수 있습니다.");return null; }
+        return Path.GetRelativePath(repo, full).Replace('\\', '/');
+    }
+    void OnAddImplFile(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "고칠 파일", Multiselect = true, InitialDirectory = ImplRepo.Text };
+        if (dialog.ShowDialog(this) == true) foreach (var f in dialog.FileNames) if (InRepo(f) is string rel) AppendLine(ImplFiles, rel);
+    }
+    void OnAddImplFolder(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog { Title = "고칠 폴더 (안의 git 추적 파일 전체, 새 파일도 이 안에 생성 가능)", InitialDirectory = ImplRepo.Text };
+        if (dialog.ShowDialog(this) == true && InRepo(dialog.FolderName) is string rel) AppendLine(ImplFiles, rel);
+    }
+    void OnAddImplReference(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "참고 파일 (읽기만)", Multiselect = true, InitialDirectory = ImplRepo.Text };
+        if (dialog.ShowDialog(this) == true) foreach (var f in dialog.FileNames) if (InRepo(f) is string rel) AppendLine(ImplReferences, rel);
+    }
+    static List<string> Lines(TextBox box) => box.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
     void OnPickInstructionFile(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Title = "지시문 파일", Filter = "지시문 (*.md;*.markdown;*.txt)|*.md;*.markdown;*.txt" };
@@ -292,14 +316,22 @@ public partial class MainWindow : Window
         if (ImplConfirmNonSensitive.IsChecked != true) { Say("저장소 내용을 보내도 되는지 확인란을 선택하세요.");return; }
         if (!int.TryParse(ImplMinutes.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int minutes) || minutes is < 1 or > 240) { Say("시간 상한은 1~240분으로 입력하세요.");return; }
         if (!decimal.TryParse(ImplReviewUsd.Text, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal reviewUsd) || reviewUsd < 0) { Say("검수 비용 상한을 숫자(USD)로 입력하세요.");return; }
+        if (!decimal.TryParse(ImplWorkerUsd.Text, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal workerUsd) || workerUsd < 0) { Say("작업자 비용 상한을 숫자(USD)로 입력하세요.");return; }
+        bool apiWorker = !ProviderCatalog.Get(worker.Provider).IsCli;
+        var files = Lines(ImplFiles);var references = Lines(ImplReferences);
+        if (apiWorker && files.Count == 0) { Say("API 작업자는 고칠 파일·폴더를 지정해야 합니다. 모델은 그 파일 내용만 보고 수정안을 냅니다.");return; }
         string instruction = Implementer.ComposeInstruction(ImplInstructionFile.Text, ImplInstruction.Text);
         var checks = ImplChecks.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
         string? continueBranch = string.IsNullOrWhiteSpace(ImplContinueBranch.Text) ? null : ImplContinueBranch.Text.Trim();
         string ask = $"저장소: {ImplRepo.Text}\n시작: {(continueBranch is null ? "현재 HEAD에서 새 브랜치 reviewgate/impl-…" : continueBranch + "에 이어서 커밋")}\n" +
             $"작업자: {worker.Label}\n교차 검수: {(reviewers.Count == 0 ? "안 함" : string.Join(" / ", reviewers.Select(r => r.Label)))}\n" +
-            $"확인 명령: {(checks.Count == 0 ? "없음" : string.Join(" ; ", checks))}\n시간 상한: {minutes}분 · 검수 비용 상한: ${reviewUsd.ToString(CultureInfo.InvariantCulture)}\n\n" +
+            $"고칠 파일·폴더: {(files.Count == 0 ? "(지정 안 함)" : string.Join(", ", files))}{(references.Count == 0 ? "" : " · 참고: " + string.Join(", ", references))}\n" +
+            $"확인 명령: {(checks.Count == 0 ? "없음" : string.Join(" ; ", checks))}\n시간 상한: {minutes}분 · 비용 상한: " +
+            (apiWorker ? $"작업자 ${workerUsd.ToString(CultureInfo.InvariantCulture)}, " : "") + $"교차 검수 ${reviewUsd.ToString(CultureInfo.InvariantCulture)}\n\n" +
             $"지시 (앞부분):\n{(instruction.Length > 400 ? instruction[..400] + " …" : instruction)}\n\n" +
-            "- 작업자는 저장소 밖 별도 폴더(worktree)에서 새 브랜치만 고칩니다. 파일 편집만 하고 명령은 실행하지 못합니다.\n" +
+            (apiWorker
+                ? "- API 작업자: 위 파일 내용과 지시가 그 제공자에게 전송됩니다(API 키 사용, 유료 모델은 비용 발생). 모델이 답한 수정안을 ReviewGate가 별도 브랜치에 적용합니다. 하나라도 맞지 않으면 아무것도 적용하지 않습니다.\n"
+                : "- 작업자는 저장소 밖 별도 폴더(worktree)에서 새 브랜치만 고칩니다. 파일 편집만 하고 명령은 실행하지 못합니다.\n") +
             "- 지금 작업 폴더와 현재 브랜치는 바뀌지 않습니다. 병합은 결과를 본 뒤 직접 고릅니다.\n" +
             "- 확인 명령은 바뀐 코드를 실행합니다. CLI는 로그인한 구독 계정으로 처리됩니다.\n\n시작할까요?";
         if (MessageBox.Show(this, ask, "구현 시작 확인", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
@@ -308,7 +340,7 @@ public partial class MainWindow : Window
         try
         {
             var outcome = await Implementer.RunAsync(new(instruction, ImplRepo.Text, new(worker.Provider, null), reviewers.Select(r => new ReviewerPick(r.Provider, null)).ToList(),
-                null, continueBranch, checks, minutes, ImplUseFallback.IsChecked == true, reviewers.Count == 0, reviewUsd), implementing.Token);
+                null, continueBranch, checks, minutes, ImplUseFallback.IsChecked == true, reviewers.Count == 0, reviewUsd, files, references, workerUsd), implementing.Token);
             ShowImplementation(outcome);RefreshRuns();Status("구현 실행을 마쳤습니다. 결과를 보고 병합·이어서 고치기·버리기를 고르세요.");
         }
         finally { implementing.Dispose();implementing = null;ImplRunButton.IsEnabled = true;ImplCancelButton.IsEnabled = false; }
@@ -330,6 +362,11 @@ public partial class MainWindow : Window
             text.AppendLine($"작업자: {S(answer?["status"]) ?? S(w["status"])} — {S(answer?["summary"]) ?? S(w["error"])}");
             foreach (var q in answer?["open_questions"] as JsonArray ?? []) text.AppendLine("  질문: " + q!.GetValue<string>());
             if (w["denied_actions"] is JsonArray { Count: > 0 } denied) text.AppendLine("  거절된 동작: " + denied.ToJsonString());
+            if (w["kind"]?.GetValue<string>() == "api")
+            {
+                text.AppendLine($"  보낸 파일 {(w["files_sent"] as JsonArray)?.Count ?? 0}개 · 적용한 수정 {(w["edits_applied"] as JsonArray)?.Count ?? 0}건 · 비용 ${w["cost_usd"]} (예약 ${w["reservation_usd"]}, {S(w["cost_basis"])})");
+                if (w["skipped"] is JsonArray { Count: > 0 } sk) text.AppendLine("  제외한 파일: " + string.Join(", ", sk.Select(x => x!.GetValue<string>())));
+            }
         }
         foreach (var c in d["checks"] as JsonArray ?? [])
             text.AppendLine($"확인 {(c!["passed"]!.GetValue<bool>() ? "통과" : c["timed_out"]!.GetValue<bool>() ? "시간 초과" : "실패")}: {S(c["command"])} (종료 {c["exit_code"]?.ToJsonString() ?? "-"}, {c["seconds"]}초)");
@@ -456,7 +493,9 @@ public partial class MainWindow : Window
         "instruction_too_large" => "지시문 파일이 너무 큽니다 (256KB 이하)",
         "instruction_required" => "지시문 파일이나 추가 지시를 입력하세요",
         "input_unavailable" => "파일이나 폴더를 찾을 수 없습니다",
-        "worker_must_be_cli" => "작업자는 CLI(Claude Code, Codex, Antigravity)만 됩니다",
+        "files_required_for_api_worker" => "API 작업자는 고칠 파일·폴더를 지정해야 합니다",
+        "file_outside_repository" => "저장소 밖의 파일은 지정할 수 없습니다",
+        "invalid_file_path" => "파일 경로가 올바르지 않습니다",
         "policy_violation" => "실행 조건에 맞지 않습니다",
         "reviewer_required" => "교차 검수자를 고르세요",
         "invalid_branch" => "이어서 고칠 브랜치는 reviewgate/impl-로 시작해야 합니다",

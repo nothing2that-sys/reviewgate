@@ -127,10 +127,11 @@ public record AllowedReviewer(string Id, string CanonicalModelKey);
 public record StandingPolicy(string SchemaVersion, string Id, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt,
     List<string> SourceRoots, List<AllowedReviewer> Reviewers, decimal MaxRunUsd, int MaxRequestsPerRun, List<string> InputClasses);
 // The standing rule for headless implementation: which repositories a CLI worker may change (always on its own
-// branch in a separate worktree, never merged), which CLI/model may do it, which check commands ReviewGate itself
-// may run afterwards (exact text), and the time limit of one worker run. Separate from the review policy.
+// branch in a separate worktree, never merged), which worker may do it (agent CLIs, or API models that answer with
+// edits), which check commands ReviewGate itself may run afterwards (exact text), the time limit of one worker run,
+// and the most one API worker call may reserve (null: API workers not allowed). Separate from the review policy.
 public record ImplementPolicy(string SchemaVersion, string Id, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt,
-    List<string> Repositories, List<AllowedReviewer> Workers, List<string> Checks, int MaxMinutes);
+    List<string> Repositories, List<AllowedReviewer> Workers, List<string> Checks, int MaxMinutes, decimal? MaxWorkerUsd = null);
 
 public record PriceSnapshot(string SchemaVersion, string Id, DateTimeOffset RetrievedAt,
     DateTimeOffset EffectiveFrom, DateTimeOffset EffectiveTo, string Source, string DocumentSha256,
