@@ -215,7 +215,10 @@ public record PairCoverage(string CriterionId, string ReviewerId, string Stage, 
 public record Coverage(int RequiredUnits, int ValidUnits, long TotalCoreBytes, long ValidCoreBytes,
     decimal? SyntheticProcessingRatio, decimal? ActualModelProcessingRatio, bool RequiredCoverageComplete,
     List<string> MissingUnitIds, List<PairCoverage> ByCriterionReviewer, List<string> EmptySourceIds);
-public record Artifact(string Path, string Sha256, long Bytes, string Kind);
+// Path is relative to the state root (what is stored and verified). AbsolutePath is added only to command output
+// (export), never to manifests or the ledger.
+public record Artifact(string Path, string Sha256, long Bytes, string Kind,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? AbsolutePath = null);
 public sealed record Envelope
 {
     public string SchemaVersion { get; init; } = Data.Version;

@@ -14,6 +14,10 @@ public sealed class HglosTests
     {
         using var e=new TestEnvironment(responses:[new(Disposition:"finding",Findings:[new("Wrong value","Reason","result",ReportedEvidenceGrade:"observed",Assumptions:["Assumption"])],Usage:new(100,20))]);using var s=e.Store();var p=e.MakePlan(s);var engine=new ReviewEngine(s);var r=await engine.ExecuteAsync(p,e.Grant(p));Assert.Equal(0,r.ExitCode);
         var export=engine.Export(r.Result.RunId!,"hglos-findings",false);Assert.Equal(0,export.ExitCode);BundleWriter.Verify(s.Root,export.Result.Artifacts);
+        // The output lists each file by absolute path too; the manifest (what is verified) keeps relative paths only.
+        Assert.All(export.Result.Artifacts,a=>{Assert.Equal(Path.GetFullPath(Path.Combine(s.Root,a.Path)),a.AbsolutePath);Assert.True(File.Exists(a.AbsolutePath));});
+        Assert.DoesNotContain("absolute_path",File.ReadAllText(export.Result.Artifacts.Single(a=>a.Kind=="manifest").AbsolutePath!));
+        Assert.Contains("\"absolute_path\"",Data.Json(export.Result));
         string raw=Path.Combine(s.Root,export.Result.Artifacts.Single(a=>a.Path.EndsWith("hglos.findings.synthetic.json",StringComparison.Ordinal)).Path);
         Assert.Equal("inferred",JsonNode.Parse(File.ReadAllText(raw))!["findings"]![0]!["evidence"]!.GetValue<string>());
         string dir=Path.Combine(TestEnvironment.Repository,"tests","fixtures","hglos"),schema=Path.Combine(dir,"findings-schema.json"),validator=Path.Combine(dir,"validate_findings.py");

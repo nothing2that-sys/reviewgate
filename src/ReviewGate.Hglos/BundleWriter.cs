@@ -31,7 +31,7 @@ public static class BundleWriter
         }
         var marker=artifacts.Single(a=>a.Kind=="manifest");var node=JsonNode.Parse(File.ReadAllText(Path.Combine(stateRoot,marker.Path)))!;
         var declared=Data.Parse<List<Artifact>>(node["artifacts"]!.ToJsonString());
-        Data.Require(Data.Json(declared)==Data.Json(artifacts.Where(a=>a.Kind!="manifest").ToList()),"bundle_manifest_mismatch",13);
+        Data.Require(Data.Json(declared)==Data.Json(artifacts.Where(a=>a.Kind!="manifest").Select(a=>a with{AbsolutePath=null}).ToList()),"bundle_manifest_mismatch",13);
         string dir=Path.GetDirectoryName(Path.Combine(stateRoot,marker.Path))!;
         Data.Require(Directory.GetFiles(dir).Length==artifacts.Count,"unexpected_bundle_file",13);
     }
@@ -78,7 +78,8 @@ public static class HglosExporter
             reviewers=plan.Reviewers,independence=Independence(plan),sources=plan.Sources.Select(s=>new{s.Id,s.RawSha256,s.TextSha256,s.ExportPath}),
             limitations=live?new[]{"live_model_review_quality_not_verified","not_an_hglos_round","existing_validator_does_not_check_provenance"}:new[]{"synthetic_fixture_not_actual_review","not_an_hglos_round","existing_validator_does_not_check_provenance"}});
         var artifacts=BundleWriter.Write(root,directory,files,plan.ExecutionMode);BundleWriter.Verify(root,artifacts);
-        return new(exit,env with{Artifacts=artifacts});
+        // Callers read the files by absolute path; the relative path stays as it was.
+        return new(exit,env with{Artifacts=artifacts.Select(a=>a with{AbsolutePath=Path.GetFullPath(Path.Combine(root,a.Path))}).ToList()});
     }
     public const string CompleteRawName="hglos.findings.synthetic.json",PartialRawName="hglos.findings.partial.synthetic.json";
     public static string RawName(bool live,bool partial)=>live?(partial?"hglos.findings.partial.live.json":"hglos.findings.live.json"):(partial?PartialRawName:CompleteRawName);
