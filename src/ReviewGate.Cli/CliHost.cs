@@ -11,9 +11,9 @@ using ReviewGate.Transport.Http;
 namespace ReviewGate.Cli;
 public static class CliHost
 {
-    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer"];
-    static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin"];
-    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer"];
+    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer","allow-root","expires-days"];
+    static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin","no-fallback"];
+    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer","allow-root"];
     public sealed class Options
     {
         public string Command {get;init;}="";
@@ -27,7 +27,7 @@ public static class CliHost
     public static Options Parse(string[] args)
     {
         Data.Require(args.Length>0,"command_required");var o=new Options{Command=args[0]};
-        Data.Require(o.Command is "plan" or "exec" or "status" or "cancel" or "resume" or "export" or "credential" or "grant","unknown_command");
+        Data.Require(o.Command is "plan" or "exec" or "status" or "cancel" or "resume" or "export" or "credential" or "grant" or "review" or "policy","unknown_command");
         for(int i=1;i<args.Length;i++)
         {
             string key=args[i];if(!key.StartsWith("--",StringComparison.Ordinal)){Data.Require(o.Instruction is null,"duplicate_instruction");o.Instruction=key;continue;}
@@ -35,6 +35,10 @@ public static class CliHost
             if(ValueKeys.Contains(key)){Data.Require(i+1<args.Length&&!args[i+1].StartsWith("--",StringComparison.Ordinal),"option_value_required");value=args[++i];}
             if(!o.Items.TryAdd(key,[value])){Data.Require(Repeated.Contains(key),"duplicate_option");o.Items[key].Add(value);}
         }
+        // Headless commands take only their own options (no config file, plan, grant, fixture or price overrides).
+        if(o.Command=="review")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "source-root" or "input" or "reference" or "repository-root" or "reviewer" or "no-fallback" or "profile" or "project" or "prompt-file" or "prompt-stdin" or "output")),"invalid_review_options");
+        if(o.Command=="policy")Data.Require(o.Instruction is "set" or "status" or "revoke"&&!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-root" or "reviewer" or "max-usd" or "max-requests" or "expires-days" or "output"))
+            &&(o.Instruction=="set"||!o.Items.Keys.Any(k=>k is not ("state-root" or "output"))),"invalid_policy_command");
         if(o.Has("config"))
         {
             Data.Require(!o.Has("plan"),"plan_override_forbidden");string path=Path.GetFullPath(o.Need("config"));
@@ -74,6 +78,11 @@ public static class CliHost
             var o=Parse(args);string state=Path.GetFullPath(o.One("state-root")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ReviewGate"));
             Data.Require(!state.StartsWith(@"\\",StringComparison.Ordinal),"network_state_root_unsupported");SafePath.NoLinks(state);
             if(command=="credential")return Credential(o) with{OutputPath=o.One("output")};
+            if(command is "review" or "policy")
+            {
+                if(o.One("output")is string output){Data.Require(!SafePath.Within(output,state)&&(o.One("source-root") is not string src||!SafePath.Within(output,src)),"output_protected_overlap");safeOutput=output;}
+                return (command=="review"?await Headless.ReviewAsync(o,state,ct):Headless.Policy(o,state)) with{OutputPath=o.One("output")};
+            }
             // The namespace comes from the plan/run ID, so a live run is never opened in the synthetic ledger or vice versa.
             string ns=command is "status" or "cancel" or "resume" or "export"?StateStore.NamespaceOf(o.Need("run")):o.Has("plan")?StateStore.NamespaceOf(o.Need("plan")):o.One("execution-mode")??"synthetic";
             Data.Require(o.One("execution-mode") is null||o.One("execution-mode")==ns,"execution_mode_mismatch");
@@ -100,8 +109,7 @@ public static class CliHost
             {
                 string source=SafePath.Full(o.Need("source-root"));
                 if(o.One("output")is string output){Data.Require(!SafePath.Within(output,source)&&!SafePath.Within(output,store.Root),"output_protected_overlap");safeOutput=output;}
-                int count=(o.Instruction is not null?1:0)+(o.Has("prompt-file")?1:0)+(o.Has("prompt-stdin")?1:0);Data.Require(count==1,"instruction_required_or_duplicated");
-                string instruction=o.Instruction??(o.One("prompt-file")is string pf?ReadInstruction(pf):await ReadStdin(ct));
+                string instruction=await InstructionAsync(o,ct);
                 p=Planner.Build(store,new(o.Need("project"),source,o.One("repository-root"),o.Need("input-class"),instruction,o.Need("profile"),o.Many("reviewer"),o.Need("budget-policy"),o.Need("prices",12),ns=="live"?o.One("fixture"):o.Need("fixture"),o.Many("input"),o.Many("reference"),o.One("mode")??"single",o.One("base-run"),o.Many("finding"),
                     // --fallback-reviewer is positional with --reviewer; "-" means no fallback for that reviewer.
                     o.Many("fallback-reviewer").Select(x=>x=="-"?null:(string?)x).ToList()));
@@ -119,6 +127,13 @@ public static class CliHost
     public static Func<ICredentialStore> CredentialFactory {get;set;}=()=>OperatingSystem.IsWindows()?new KeyRing(new WindowsCredentialVault()):throw new ReviewError(14,"credential_store_unsupported");
     public static Func<HttpMessageHandler?> HandlerFactory {get;set;}=()=>null;
     public static Func<IModelTransport> CliFactory {get;set;}=()=>new ReviewGate.Transport.Cli.CliTransport();
+    // Reviewer, review and price profiles ship next to the executable.
+    public static string ProfilesRoot {get;set;}=Path.Combine(AppContext.BaseDirectory,"profiles");
+    public static async Task<string> InstructionAsync(Options o,CancellationToken ct)
+    {
+        int count=(o.Instruction is not null?1:0)+(o.Has("prompt-file")?1:0)+(o.Has("prompt-stdin")?1:0);Data.Require(count==1,"instruction_required_or_duplicated");
+        return o.Instruction??(o.One("prompt-file")is string pf?ReadInstruction(pf):await ReadStdin(ct));
+    }
     // Keys are typed by the user into this console only; they are never accepted from arguments, files,
     // environment variables or redirected stdin, and never echoed or returned.
     static CommandResult Credential(Options o)

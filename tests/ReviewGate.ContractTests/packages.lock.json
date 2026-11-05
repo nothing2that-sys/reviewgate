@@ -138,9 +138,18 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
+      "reviewgate.app": {
+        "type": "Project",
+        "dependencies": {
+          "ReviewGate.Core": "[1.0.0, )",
+          "ReviewGate.Transport.Cli": "[1.0.0, )",
+          "ReviewGate.Transport.Http": "[1.0.0, )"
+        }
+      },
       "reviewgate.cli": {
         "type": "Project",
         "dependencies": {
+          "ReviewGate.App": "[1.0.0, )",
           "ReviewGate.Core": "[1.0.0, )",
           "ReviewGate.Transport.Cli": "[1.0.0, )",
           "ReviewGate.Transport.Http": "[1.0.0, )"

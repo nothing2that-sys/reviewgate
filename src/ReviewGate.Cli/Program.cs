@@ -5,7 +5,7 @@ using ReviewGate.Contracts;
 Console.OutputEncoding = new UTF8Encoding(false);
 Console.InputEncoding = Data.Utf8;
 if (args is ["--version"]) { Console.WriteLine("ReviewGate 0.2.0-live-preview"); return 0; }
-if (args is ["--help"]) { Console.WriteLine("reviewgate plan|exec|status|cancel|resume|export|grant|credential [options]\nSynthetic fixtures by default; live models via plan --execution-mode live, an interactive grant, then exec --plan. See docs/OFFLINE_USAGE.md and docs/LIVE_CONNECTION_V0_2.md."); return 0; }
+if (args is ["--help"]) { Console.WriteLine("reviewgate review \"<instruction>\" --source-root <dir> [--input <path>]... --reviewer <provider>[=<model>] [--reviewer ...] [--no-fallback] [--profile code|document|novel]\n  One-shot live review for agents, allowed by the standing policy (see docs/AGENT_USAGE.md).\nreviewgate policy set|status|revoke  (set: interactive console only)\nreviewgate plan|exec|status|cancel|resume|export|grant|credential [options]\n  Synthetic fixtures by default; live models via plan --execution-mode live, an interactive grant, then exec --plan. See docs/OFFLINE_USAGE.md and docs/LIVE_CONNECTION_V0_2.md."); return 0; }
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
 var result = await CliHost.RunAsync(args, cancellation.Token);

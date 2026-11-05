@@ -9,5 +9,10 @@
     <ProjectReference Include="..\ReviewGate.Core\ReviewGate.Core.csproj" />
     <ProjectReference Include="..\ReviewGate.Transport.Http\ReviewGate.Transport.Http.csproj" />
     <ProjectReference Include="..\ReviewGate.Transport.Cli\ReviewGate.Transport.Cli.csproj" />
+    <ProjectReference Include="..\ReviewGate.App\ReviewGate.App.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Reviewer, review, budget and price profiles ship next to the executable (headless review). -->
+    <None Include="..\..\profiles\**\*" LinkBase="profiles" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

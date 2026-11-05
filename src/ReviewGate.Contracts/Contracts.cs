@@ -95,6 +95,30 @@ public static class PriceRules
     public static bool InWindow(PriceSnapshot prices, DateTimeOffset now) => prices.EffectiveFrom <= now && now < prices.EffectiveTo;
     public static bool Usable(Plan p, DateTimeOffset now) => InWindow(p.Prices, now) || AllZero(p.Prices, p.Reviewers.Select(r => r.CanonicalModelKey));
 }
+// Shipped snapshots are live-<date>.json (paid) and live-<date>-google-free.json (Google rows at the free tier);
+// snapshots the user approved after a price refresh are user-<stamp>[-google-free].json in the approved folder.
+// Among those whose window covers now, the most recently retrieved wins. With none in its window, the nearest one is
+// used, so all-zero-price plans keep working and paid plans stop with price_snapshot_expired until prices are refreshed.
+public static class PriceSnapshots
+{
+    public static (PriceSnapshot Snapshot, string File) Select(string folder, bool googleFree, DateTimeOffset now, string? approvedFolder = null)
+    {
+        var files = Directory.GetFiles(folder, "live-*.json").Concat(approvedFolder is not null && Directory.Exists(approvedFolder) ? Directory.GetFiles(approvedFolder, "user-*.json") : []);
+        var all = files.Where(f => f.EndsWith("-google-free.json", StringComparison.Ordinal) == googleFree)
+            .Select(f => (Snapshot: Data.Read<PriceSnapshot>(f), File: f)).OrderBy(s => s.Snapshot.EffectiveFrom).ThenBy(s => s.Snapshot.RetrievedAt).ToList();
+        Data.Require(all.Count > 0, "price_snapshot_unavailable", 12);
+        var current = all.Where(s => PriceRules.InWindow(s.Snapshot, now)).ToList();
+        return current.Count > 0 ? current.MaxBy(s => s.Snapshot.RetrievedAt) : all.LastOrDefault(s => s.Snapshot.EffectiveFrom <= now) is { File: not null } past ? past : all[0];
+    }
+}
+
+// Standing approval for agents: a person issues it once in an interactive console (or the desktop app), and a
+// headless "review" whose plan stays inside it gets its per-run grant automatically. Anything outside it stops
+// with approval_required. Agents can narrow or revoke it but cannot issue or widen it.
+public record AllowedReviewer(string Id, string CanonicalModelKey);
+public record StandingPolicy(string SchemaVersion, string Id, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt,
+    List<string> SourceRoots, List<AllowedReviewer> Reviewers, decimal MaxRunUsd, int MaxRequestsPerRun, List<string> InputClasses);
+
 public record PriceSnapshot(string SchemaVersion, string Id, DateTimeOffset RetrievedAt,
     DateTimeOffset EffectiveFrom, DateTimeOffset EffectiveTo, string Source, string DocumentSha256,
     List<PriceRow> Prices, string Currency = "USD");
