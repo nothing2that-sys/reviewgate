@@ -24,7 +24,10 @@ public sealed class PriceRefreshTests
     static JsonObject Row(string model, decimal? input, decimal? cached, decimal? output, string free = "unknown", string? next = null, string? quote = null) => new()
     {
         ["model_id"] = model, ["found"] = input is not null, ["input_per_million"] = input, ["cached_input_per_million"] = cached, ["output_per_million"] = output,
-        ["free_tier"] = free, ["quote"] = quote ?? (input is null ? "" : $"{model} Input ${input:0.00##} Cached ${cached:0.00###} Output ${output:0.00##}"),
+        ["free_tier"] = free,
+        // Separate lines per price, as on Google's page; a test can replace the output quote.
+        ["input_quote"] = input is null ? null : $"Input price ${input:0.00##} through December 31, 2026.", ["cached_input_quote"] = input is null ? null : $"Context caching ${cached:0.00###}",
+        ["output_quote"] = input is null ? null : quote ?? $"Output price (including thinking tokens) ${output:0.00##}",
         ["source_url"] = "https://example.invalid/pricing", ["next_change_date"] = next, ["next_change_quote"] = next is null ? null : "changes " + next
     };
     // What both CLIs report, unless a test changes one of them.

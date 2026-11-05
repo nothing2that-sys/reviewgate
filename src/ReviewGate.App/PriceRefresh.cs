@@ -11,7 +11,11 @@ namespace ReviewGate.App;
 public record PriceSources(string SchemaVersion, Dictionary<string, string> Pages);
 public record PriceTarget(string Provider, string ModelId, string CanonicalModelKey, string Page);
 public record PriceLookupRow(string ModelId, bool Found, decimal? InputPerMillion, decimal? CachedInputPerMillion, decimal? OutputPerMillion,
-    string FreeTier, string Quote, string SourceUrl, string? NextChangeDate, string? NextChangeQuote);
+    string FreeTier, string? InputQuote, string? CachedInputQuote, string? OutputQuote, string SourceUrl, string? NextChangeDate, string? NextChangeQuote)
+{
+    // Pricing pages often print each price on its own line, so each number has its own verbatim quote.
+    public string Quotes => string.Join(" / ", new[] { InputQuote, CachedInputQuote, OutputQuote }.Where(q => !string.IsNullOrWhiteSpace(q)).Distinct());
+}
 public record PriceLookup(string Cli, string Status, string? Error, List<PriceLookupRow> Models);
 public record PriceProposalRow(PriceTarget Target, PriceRow? Current, string Status, decimal? InputPerMillion, decimal? CachedInputPerMillion,
     decimal? OutputPerMillion, string FreeTier, DateOnly? NextChange, List<string> Notes, List<string> Quotes)
@@ -43,7 +47,7 @@ public static class PriceRefresh
                 ["items"] = new JsonObject
                 {
                     ["type"] = "object", ["additionalProperties"] = false,
-                    ["required"] = new JsonArray("model_id", "found", "input_per_million", "cached_input_per_million", "output_per_million", "free_tier", "quote", "source_url", "next_change_date", "next_change_quote"),
+                    ["required"] = new JsonArray("model_id", "found", "input_per_million", "cached_input_per_million", "output_per_million", "free_tier", "input_quote", "cached_input_quote", "output_quote", "source_url", "next_change_date", "next_change_quote"),
                     ["properties"] = new JsonObject
                     {
                         ["model_id"] = new JsonObject { ["type"] = "string" },
@@ -52,7 +56,9 @@ public static class PriceRefresh
                         ["cached_input_per_million"] = new JsonObject { ["type"] = new JsonArray("number", "null") },
                         ["output_per_million"] = new JsonObject { ["type"] = new JsonArray("number", "null") },
                         ["free_tier"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("yes", "no", "unknown") },
-                        ["quote"] = new JsonObject { ["type"] = "string", ["description"] = "Exact page text that contains the prices, copied verbatim." },
+                        ["input_quote"] = new JsonObject { ["type"] = new JsonArray("string", "null"), ["description"] = "Exact page text that shows the input price, copied verbatim." },
+                        ["cached_input_quote"] = new JsonObject { ["type"] = new JsonArray("string", "null"), ["description"] = "Exact page text that shows the cached input price, copied verbatim." },
+                        ["output_quote"] = new JsonObject { ["type"] = new JsonArray("string", "null"), ["description"] = "Exact page text that shows the output price, copied verbatim." },
                         ["source_url"] = new JsonObject { ["type"] = "string" },
                         ["next_change_date"] = new JsonObject { ["type"] = new JsonArray("string", "null"), ["description"] = "First announced future price change, YYYY-MM-DD, or null." },
                         ["next_change_quote"] = new JsonObject { ["type"] = new JsonArray("string", "null") }
@@ -67,7 +73,7 @@ public static class PriceRefresh
         var text = new StringBuilder();
         text.Append("Today is ").Append(now.ToOffset(Kst).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append(" (KST).\n");
         text.Append("For each model below, open its official pricing page and report the Standard tier (not batch, flex or priority), short-context price in USD per 1M tokens that is in effect today: input, cached input, and output (output including thinking/reasoning tokens). ");
-        text.Append("Put in quote the exact page text that shows those numbers. Report free_tier as yes, no or unknown. If the page announces a future price change for the model, give the first future effective date as YYYY-MM-DD with its quote; otherwise null. ");
+        text.Append("For each of the three prices, put in input_quote, cached_input_quote and output_quote the exact page text (copied verbatim, e.g. the whole table row or line) that shows that number. Report free_tier as yes, no or unknown. If the page announces a future price change for the model, give the first future effective date as YYYY-MM-DD with its quote; otherwise null. ");
         text.Append("If the model is not on the page, set found=false and all numbers null. Keep model_id exactly as given.\n\n");
         foreach (var t in targets) text.Append("- model_id: ").Append(t.ModelId).Append(" | provider: ").Append(t.Provider).Append(" | page: ").Append(t.Page).Append('\n');
         return text.ToString();
@@ -84,13 +90,14 @@ public static class PriceRefresh
         static string? Str(JsonNode? n) => n is JsonValue v && v.TryGetValue(out string? s) ? s : null;
         var rows = models.OfType<JsonObject>().Select(m => new PriceLookupRow(Str(m["model_id"]) ?? "", m["found"] is JsonValue f && f.TryGetValue(out bool b) && b,
             Num(m["input_per_million"]), Num(m["cached_input_per_million"]), Num(m["output_per_million"]), Str(m["free_tier"]) ?? "unknown",
-            Str(m["quote"]) ?? "", Str(m["source_url"]) ?? "", Str(m["next_change_date"]), Str(m["next_change_quote"]))).ToList();
+            Str(m["input_quote"]), Str(m["cached_input_quote"]), Str(m["output_quote"]), Str(m["source_url"]) ?? "", Str(m["next_change_date"]), Str(m["next_change_quote"]))).ToList();
         return new(cli, "completed", null, rows);
     }
 
     // A printed price such as "$0.75", "0.075" or "$2.00" must appear in the quote the CLI gave.
-    public static bool InQuote(decimal value, string quote)
+    public static bool InQuote(decimal value, string? quote)
     {
+        if (string.IsNullOrEmpty(quote)) return false;
         string plain = value.ToString("0.##########", CultureInfo.InvariantCulture);
         var forms = new[] { plain, value.ToString("0.00##########", CultureInfo.InvariantCulture) };
         // A whole number like "2" alone matches too much text; require "$2" or "2.00".
@@ -105,7 +112,7 @@ public static class PriceRefresh
         {
             var currentRow = current.Prices.SingleOrDefault(p => p.CanonicalModelKey == t.CanonicalModelKey);
             var answers = lookups.Select(l => (l.Cli, Row: l.Models.FirstOrDefault(m => string.Equals(m.ModelId, t.ModelId, StringComparison.OrdinalIgnoreCase)))).ToList();
-            var notes = new List<string>();var quotes = answers.Where(a => a.Row is { Quote.Length: > 0 }).Select(a => $"{a.Cli}: {a.Row!.Quote}").ToList();
+            var notes = new List<string>();var quotes = answers.Where(a => a.Row is not null && a.Row.Quotes.Length > 0).Select(a => $"{a.Cli}: {a.Row!.Quotes}").ToList();
             string free = answers.Select(a => a.Row?.FreeTier ?? "unknown").Distinct().Count() == 1 ? answers[0].Row?.FreeTier ?? "unknown" : "unknown";
             if (answers.Any(a => a.Row is null || !a.Row.Found || a.Row.InputPerMillion is null || a.Row.OutputPerMillion is null))
             {
@@ -119,8 +126,8 @@ public static class PriceRefresh
                 notes.Add("두 CLI의 값이 다름: " + string.Join(" / ", answers.Select(a => $"{a.Cli} {Show(a.Row!.InputPerMillion)}·{Show(a.Row.CachedInputPerMillion)}·{Show(a.Row.OutputPerMillion)}")));
                 rows.Add(new(t, currentRow, "disagree", null, null, null, free, null, notes, quotes));continue;
             }
-            var unquoted = answers.Where(a => !InQuote(a.Row!.InputPerMillion!.Value, a.Row.Quote) || !InQuote(a.Row.OutputPerMillion!.Value, a.Row.Quote)
-                || a.Row.CachedInputPerMillion is decimal c && c > 0 && !InQuote(c, a.Row.Quote)).Select(a => a.Cli).ToList();
+            var unquoted = answers.Where(a => !InQuote(a.Row!.InputPerMillion!.Value, a.Row.InputQuote) || !InQuote(a.Row.OutputPerMillion!.Value, a.Row.OutputQuote)
+                || a.Row.CachedInputPerMillion is decimal c && c > 0 && !InQuote(c, a.Row.CachedInputQuote)).Select(a => a.Cli).ToList();
             if (unquoted.Count > 0)
             {
                 notes.Add(string.Join(", ", unquoted) + ": 인용 문구에 숫자가 없음");
