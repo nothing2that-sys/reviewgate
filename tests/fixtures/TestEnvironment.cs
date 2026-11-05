@@ -5,6 +5,17 @@ using ReviewGate.Infrastructure;
 
 namespace ReviewGate.Testing;
 
+// In-memory stand-in for Windows Credential Manager; KeyRing runs unchanged on top of it.
+public sealed class MemoryVault : ICredentialVault
+{
+    public Dictionary<string, (string UserName, string Secret, DateTimeOffset Written)> Items { get; } = [];
+    int clock;
+    public string? Read(string target) => Items.TryGetValue(target, out var item) ? item.Secret : null;
+    public void Write(string target, string userName, string secret) => Items[target] = (userName, secret, DateTimeOffset.UnixEpoch.AddSeconds(++clock));
+    public bool Delete(string target) => Items.Remove(target);
+    public IReadOnlyList<VaultItem> Enumerate(string prefix) => Items.Where(x => x.Key.StartsWith(prefix, StringComparison.Ordinal)).Select(x => new VaultItem(x.Key, x.Value.UserName, x.Value.Written)).ToList();
+}
+
 public sealed class TestEnvironment : IDisposable
 {
     public string Root {get;}=Path.Combine(Path.GetTempPath(),"ReviewGate-tests",Guid.NewGuid().ToString("N"));

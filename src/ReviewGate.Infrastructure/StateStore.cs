@@ -175,6 +175,13 @@ public sealed class StateStore : IDisposable
         Adopt(attempt.Id,path);
     }
     void Adopt(string id,string path)=>Exec("UPDATE attempts SET phase='response_saved',response_path=$p,response_hash=$h WHERE id=$i",null,("$p",path),("$h",Data.FileHash(path)),("$i",id));
+    // Only for attempts whose pinned price row is zero in every billed item: usage of any size costs 0.
+    public void SettleZeroPrice(string id)
+    {
+        using var tx=db.BeginTransaction();
+        if(Exec("UPDATE attempts SET phase='settled',cost='0',error='zero_price_no_charge' WHERE id=$i AND phase='unknown'",tx,("$i",id))==1)Event(id,"zero_price_settle",0,"pinned_price_snapshot_all_rates_zero",tx);
+        tx.Commit();
+    }
     public void Unknown(string id,string code)=>Exec("UPDATE attempts SET phase='unknown',error=$e WHERE id=$i",null,("$i",id),("$e",code));
     public void Uncertain(AttemptRow a,UnitResult unit,string error)
     {using var tx=db.BeginTransaction();Exec("INSERT OR REPLACE INTO units VALUES($r,$u,$j)",tx,("$r",a.RunId),("$u",unit.UnitId),("$j",Data.Json(unit)));Exec("UPDATE attempts SET phase='unknown',error=$e WHERE id=$i",tx,("$e",error),("$i",a.Id));tx.Commit();}

@@ -14,12 +14,16 @@ namespace ReviewGate.ProviderTests;
 public sealed class LiveTransportTests
 {
     const string Key = "TEST_ONLY_LIVE_KEY_SENTINEL_0123456789";
-    sealed class FakeCredentials(params string[] providers) : ICredentialStore
+    // The real KeyRing over an in-memory vault, pre-loaded with one active key per named provider.
+    sealed class FakeCredentials : ICredentialStore
     {
-        readonly Dictionary<string, string> keys = providers.ToDictionary(p => p, _ => Key);
-        public string? Read(string provider) => keys.GetValueOrDefault(provider);
-        public void Write(string provider, string secret) => keys[provider] = secret;
-        public bool Delete(string provider) => keys.Remove(provider);
+        readonly KeyRing ring = new(new MemoryVault());
+        public FakeCredentials(params string[] providers) { foreach (var p in providers) ring.Add(p, "test", Key); }
+        public string? Read(string provider) => ring.Read(provider);
+        public IReadOnlyList<CredentialEntry> List(string provider) => ring.List(provider);
+        public string Add(string provider, string name, string secret) => ring.Add(provider, name, secret);
+        public bool Remove(string provider, string id) => ring.Remove(provider, id);
+        public void Activate(string provider, string id) => ring.Activate(provider, id);
     }
     sealed class Recorder(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond) : HttpMessageHandler
     {
@@ -213,7 +217,7 @@ public sealed class LiveTransportTests
     [Fact] public void ShippedLiveProfilesPlanWithinTheSmokeBudget()
     {
         string profiles = Path.Combine(TestEnvironment.Repository, "profiles");
-        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(7, reviewers.Length);
+        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(8, reviewers.Length);
         foreach (var reviewer in reviewers)
         {
             using var e = new TestEnvironment();

@@ -11,9 +11,9 @@ using ReviewGate.Transport.Http;
 namespace ReviewGate.Cli;
 public static class CliHost
 {
-    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes"];
+    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer"];
     static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin"];
-    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding"];
+    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer"];
     public sealed class Options
     {
         public string Command {get;init;}="";
@@ -58,7 +58,7 @@ public static class CliHost
         Data.Require(!o.Has("resolve-unknown")||(o.Command=="resume"&&o.Has("recover-only")),"invalid_option_combination");
         if(o.Command=="grant")Data.Require(o.Has("plan")&&o.Has("max-usd")&&o.Instruction is null&&!o.Items.Keys.Any(k=>k is not ("plan" or "state-root" or "max-usd" or "max-requests" or "max-retries" or "expires-minutes" or "output")),"invalid_grant_options");
         else if(o.Has("plan"))Data.Require(o.Command=="exec"&&o.Instruction is null&&!o.Items.Keys.Any(k=>k is not ("plan" or "state-root" or "grant-file" or "output" or "execution-mode")),"plan_override_forbidden");
-        if(o.Command=="credential")Data.Require(o.Instruction is "set" or "status" or "delete"&&!o.Items.Keys.Any(k=>k is not ("provider" or "output")),"invalid_credential_command");
+        if(o.Command=="credential")Data.Require(o.Instruction is "set" or "status" or "delete" or "activate"&&!o.Items.Keys.Any(k=>k is not ("provider" or "name" or "key-id" or "output")),"invalid_credential_command");
         if(o.Command is "status" or "cancel" or "resume" or "export")Data.Require(o.Instruction is null&&!o.Has("prompt-file")&&!o.Has("prompt-stdin"),"unexpected_instruction");
         if(o.Has("output")){string file=Path.GetFullPath(o.Need("output"));SafePath.NoLinks(file);Data.Require(!File.Exists(file)&&!Directory.Exists(file),"output_already_exists");}
         return o;
@@ -102,7 +102,9 @@ public static class CliHost
                 if(o.One("output")is string output){Data.Require(!SafePath.Within(output,source)&&!SafePath.Within(output,store.Root),"output_protected_overlap");safeOutput=output;}
                 int count=(o.Instruction is not null?1:0)+(o.Has("prompt-file")?1:0)+(o.Has("prompt-stdin")?1:0);Data.Require(count==1,"instruction_required_or_duplicated");
                 string instruction=o.Instruction??(o.One("prompt-file")is string pf?ReadInstruction(pf):await ReadStdin(ct));
-                p=Planner.Build(store,new(o.Need("project"),source,o.One("repository-root"),o.Need("input-class"),instruction,o.Need("profile"),o.Many("reviewer"),o.Need("budget-policy"),o.Need("prices",12),ns=="live"?o.One("fixture"):o.Need("fixture"),o.Many("input"),o.Many("reference"),o.One("mode")??"single",o.One("base-run"),o.Many("finding")));
+                p=Planner.Build(store,new(o.Need("project"),source,o.One("repository-root"),o.Need("input-class"),instruction,o.Need("profile"),o.Many("reviewer"),o.Need("budget-policy"),o.Need("prices",12),ns=="live"?o.One("fixture"):o.Need("fixture"),o.Many("input"),o.Many("reference"),o.One("mode")??"single",o.One("base-run"),o.Many("finding"),
+                    // --fallback-reviewer is positional with --reviewer; "-" means no fallback for that reviewer.
+                    o.Many("fallback-reviewer").Select(x=>x=="-"?null:(string?)x).ToList()));
             }
             if(command=="plan")return new(0,new Envelope{Command="plan",ExecutionMode=ns,Limitations=ns=="live"?Envelope.LiveLimitations:new Envelope().Limitations,PlanId=p.Id,Status="planned",RequiredAction=ns=="live"?"issue_live_grant_interactively":"provide_simulation_grant",Cost=new JsonObject{["estimated_upper_usd"]=p.Requests.Sum(r=>r.ReservationUsd),["mode"]=ns,["billed_usd"]=null},Artifacts=ReviewGate.Hglos.BundleWriter.Write(store.Root,store.PathFor("plans",p.Id,Data.Id("preview")),new Dictionary<string,string>{{"plan.json",Data.Json(p)}},ns)},o.One("output"));
             return (await engine.ExecuteAsync(p,o.One("grant-file")is string g?Data.Read<Grant>(g):null,cancellation:ct)) with {OutputPath=o.One("output")};
@@ -114,23 +116,25 @@ public static class CliHost
         catch(Exception){return new(21,new Envelope{Command=command,ErrorCode="internal_failure"},safeOutput);}
     }
     // Seams for tests; the shipped CLI uses Windows Credential Manager and the default network handler.
-    public static Func<ICredentialStore> CredentialFactory {get;set;}=()=>OperatingSystem.IsWindows()?new WindowsCredentialStore():throw new ReviewError(14,"credential_store_unsupported");
+    public static Func<ICredentialStore> CredentialFactory {get;set;}=()=>OperatingSystem.IsWindows()?new KeyRing(new WindowsCredentialVault()):throw new ReviewError(14,"credential_store_unsupported");
     public static Func<HttpMessageHandler?> HandlerFactory {get;set;}=()=>null;
-    static readonly string[] LiveProviders=["openai","together","google"];
     // Keys are typed by the user into this console only; they are never accepted from arguments, files,
     // environment variables or redirected stdin, and never echoed or returned.
     static CommandResult Credential(Options o)
     {
         var credentials=CredentialFactory();string action=o.Instruction!;
+        static JsonArray Keys(ICredentialStore store,string provider)=>new(store.List(provider).Select(k=>(JsonNode?)new JsonObject{["id"]=k.Id,["name"]=k.Name,["active"]=k.Active,["saved"]=k.Saved?.ToString("O")}).ToArray());
         if(action=="status")
         {
-            var configured=new JsonObject();foreach(var p in LiveProviders)configured[p]=credentials.Read(p) is {Length:>0};
-            return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="ok",Limitations=[],Details=new JsonObject{["configured"]=configured,["store"]="windows_credential_manager"}});
+            var providers=new JsonObject();foreach(var p in ProviderCatalog.Ids)providers[p]=Keys(credentials,p);
+            return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="ok",Limitations=[],Details=new JsonObject{["keys"]=providers,["store"]="windows_credential_manager"}});
         }
-        string provider=o.Need("provider");Data.Require(LiveProviders.Contains(provider),"unsupported_provider");
-        if(action=="delete")return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="ok",Limitations=[],Details=new JsonObject{["provider"]=provider,["removed"]=credentials.Delete(provider)}});
+        string provider=ProviderCatalog.Get(o.Need("provider")).Id;
+        if(action=="delete")return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="ok",Limitations=[],Details=new JsonObject{["provider"]=provider,["removed"]=credentials.Remove(provider,o.Need("key-id")),["keys"]=Keys(credentials,provider)}});
+        if(action=="activate"){credentials.Activate(provider,o.Need("key-id"));return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="ok",Limitations=[],Details=new JsonObject{["provider"]=provider,["keys"]=Keys(credentials,provider)}});}
         Data.Require(!Console.IsInputRedirected,"interactive_console_required");
-        Console.Error.Write($"Enter the {provider} API key for ReviewGate (input hidden, Enter to save, Esc to cancel): ");
+        string name=o.One("name")??"CLI "+DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm",System.Globalization.CultureInfo.InvariantCulture);
+        Console.Error.Write($"Enter the {provider} API key '{name}' for ReviewGate (input hidden, Enter to save, Esc to cancel): ");
         var typed=new StringBuilder();
         while(true)
         {
@@ -141,8 +145,8 @@ public static class CliHost
             if(!char.IsControl(key.KeyChar))typed.Append(key.KeyChar);
         }
         Console.Error.WriteLine();
-        try{credentials.Write(provider,typed.ToString());}finally{typed.Clear();}
-        return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="stored",Limitations=[],Details=new JsonObject{["provider"]=provider,["stored"]=true}});
+        string id;try{id=credentials.Add(provider,name,typed.ToString());}finally{typed.Clear();}
+        return new(0,new Envelope{Command="credential",ExecutionMode="live",Status="stored",Limitations=[],Details=new JsonObject{["provider"]=provider,["key_id"]=id,["keys"]=Keys(credentials,provider)}});
     }
     // A live grant is issued only after the user reads the send summary in an interactive console and
     // types the end of the plan ID. This is a local confirmation, not proof that a human approved it.

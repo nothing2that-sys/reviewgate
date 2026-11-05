@@ -14,7 +14,7 @@ public static class WireAdapters
         Data.Require(!string.IsNullOrWhiteSpace(r.Id)&&!string.IsNullOrWhiteSpace(r.ModelId)&&!string.IsNullOrWhiteSpace(r.CanonicalModelKey),"invalid_reviewer");
         // Lower-case, whitespace-free keys stop case or spacing variants from posing as distinct models.
         Data.Require(System.Text.RegularExpressions.Regex.IsMatch(r.CanonicalModelKey,"^[a-z0-9][a-z0-9._/:@-]{0,127}$"),"invalid_canonical_model_key");
-        Data.Require((r.HostingProvider,r.ApiProfile) is ("openai","responses") or ("together","chat_completions") or ("google","interactions"),"unsupported_capability",14);
+        Data.Require(ProviderCatalog.All.Any(p=>p.Id==r.HostingProvider&&p.ApiProfile==r.ApiProfile),"unsupported_capability",14);
         Data.Require(r.InputTokenUpperBound>0&&r.MaxOutputTokens>0&&r.MaxReasoningTokens>=0&&r.MaxRequestBytes>0,"unbounded_request",12);
         Data.Require(r.TimeoutSeconds is >=1 and <=900,"invalid_timeout");
         Data.Require(r.ReasoningEffort is null||(r.HostingProvider switch

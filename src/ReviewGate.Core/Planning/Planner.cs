@@ -8,7 +8,7 @@ namespace ReviewGate.Core.Planning;
 
 public record PlanInput(string Project,string SourceRoot,string? RepositoryRoot,string InputClass,
     string Instruction,string ProfileFile,List<string> ReviewerFiles,string BudgetFile,string PriceFile,
-    string? FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null);
+    string? FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null,List<string?>? FallbackReviewerFiles=null);
 public static class Planner
 {
     public static Plan Build(StateStore store,PlanInput input)
@@ -24,17 +24,23 @@ public static class Planner
         bool live=store.Namespace=="live";
         // Live plans never take a fixture; synthetic plans always need one. Neither can stand in for the other.
         Data.Require(live?input.FixtureFile is null:input.FixtureFile is not null,live?"fixture_not_allowed_in_live":"fixture_required");
-        var pinPaths=new[]{input.ProfileFile,input.BudgetFile,input.PriceFile}.Concat(live?Array.Empty<string>():new[]{input.FixtureFile!}).Concat(input.ReviewerFiles).Select(Path.GetFullPath).ToList();
+        var pinPaths=new[]{input.ProfileFile,input.BudgetFile,input.PriceFile}.Concat(live?Array.Empty<string>():new[]{input.FixtureFile!}).Concat(input.ReviewerFiles).Concat((input.FallbackReviewerFiles??[]).OfType<string>()).Select(Path.GetFullPath).ToList();
         foreach(var path in pinPaths){SafePath.NoLinks(path);Data.Require(File.Exists(path),"input_unavailable");}
         var pins=pinPaths.Select(p=>new InputPin(p,Data.FileHash(p))).ToList();
         var profile=Data.Read<ReviewProfile>(input.ProfileFile);Validate(profile);
         var reviewers=input.ReviewerFiles.Select(Data.Read<ReviewerProfile>).ToList();
         Data.Require(reviewers.Count==(input.Mode=="independent"?2:1),"reviewer_count_mismatch");
-        foreach(var r in reviewers)WireAdapters.Validate(r);
-        Data.Require(reviewers.Select(r=>r.Id).Distinct().Count()==reviewers.Count,"duplicate_reviewer_id");
-        Data.Require(reviewers.Select(r=>r.CanonicalModelKey).Distinct().Count()==reviewers.Count,"duplicate_reviewer_model");
+        // A fallback reviewer (aligned by position) is pre-approved in the plan and used only when its primary gives no answer.
+        var fallbackFiles=input.FallbackReviewerFiles??[];Data.Require(fallbackFiles.Count<=reviewers.Count,"fallback_count_mismatch");
+        var fallbacks=new Dictionary<string,ReviewerProfile>();
+        for(int i=0;i<fallbackFiles.Count;i++)if(fallbackFiles[i] is string file)fallbacks[reviewers[i].Id]=Data.Read<ReviewerProfile>(file);
+        var everyone=reviewers.Concat(fallbacks.Values).ToList();
+        foreach(var r in everyone)WireAdapters.Validate(r);
+        Data.Require(everyone.Select(r=>r.Id).Distinct().Count()==everyone.Count,"duplicate_reviewer_id");
+        Data.Require(everyone.Select(r=>r.CanonicalModelKey).Distinct().Count()==everyone.Count,"duplicate_reviewer_model");
         // The declared key is not a verified identity: the same model id/version under another key or host is the same model.
-        Data.Require(reviewers.Select(ModelIdentity).Distinct().Count()==reviewers.Count,"duplicate_reviewer_model");
+        // Fallbacks must also differ from every primary, so independence is never satisfied by the same model twice.
+        Data.Require(everyone.Select(ModelIdentity).Distinct().Count()==everyone.Count,"duplicate_reviewer_model");
         var budget=Data.Read<BudgetPolicy>(input.BudgetFile);Data.VersionIs(budget.SchemaVersion);
         Data.Require(budget.Currency=="USD"&&budget.Timezone=="+09:00"&&budget.RunUsd>0&&budget.ProjectUsd>0&&budget.MonthUsd>0&&budget.MaxRequests>0&&budget.MaxRetries>=0,"invalid_budget");
         var prices=Data.Read<PriceSnapshot>(input.PriceFile);Data.VersionIs(prices.SchemaVersion);
@@ -42,7 +48,7 @@ public static class Planner
             &&Regex.IsMatch(prices.DocumentSha256??"", "^[a-fA-F0-9]{64}$")&&prices.EffectiveFrom<=store.Now&&store.Now<prices.EffectiveTo,"price_snapshot_unavailable",12);
         Data.Require(prices.Prices.Select(x=>x.CanonicalModelKey).Distinct().Count()==prices.Prices.Count,"ambiguous_prices",12);
         foreach(var price in prices.Prices)Data.Require(price.InputPerMillion>=0&&price.OutputPerMillion>=0&&price.CachedInputPerMillion>=0&&price.ReasoningPerMillion>=0,"invalid_price",12);
-        foreach(var r in reviewers.Where(r=>live&&r.HostingProvider=="google"))
+        foreach(var r in everyone.Where(r=>live&&r.HostingProvider=="google"))
         {
             // Google thinking cannot be capped through the API; a declared bound and a separately billed reasoning row are required.
             Data.Require(r.MaxReasoningTokens>0,"unbounded_request",12);
@@ -70,11 +76,13 @@ public static class Planner
         var sources=capture.Sources.Select(s=>s with{ExportPath=IsDiff(s.OriginalPath)?null:s.ExportPath}).ToList();
         if(input.Mode=="verify")Data.Require(selectedFindings.All(f=>sources.Any(s=>s.Id==f.SourceId)),"verification_snapshot_mismatch",13);
         var p=new Plan{Id=id,ExecutionMode=store.Namespace,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
-            InstructionHash=Data.Hash(input.Instruction),Profile=profile,Reviewers=reviewers,Budget=budget,Prices=prices,Fixture=fixture,
+            InstructionHash=Data.Hash(input.Instruction),Profile=profile,Reviewers=everyone,Fallbacks=fallbacks.ToDictionary(x=>x.Key,x=>x.Value.Id),Budget=budget,Prices=prices,Fixture=fixture,
             Pins=pins,DirectoryPins=directoryPins,Sources=sources,Exclusions=capture.Exclusions,Chunks=capture.Chunks,Mode=input.Mode,BaseRun=input.BaseRun,FindingIds=input.Findings??[]};
         foreach(var reviewer in reviewers)
         {
             var price=prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==reviewer.CanonicalModelKey)??throw new ReviewError(12,"price_missing");
+            var fallback=fallbacks.GetValueOrDefault(reviewer.Id);
+            var fallbackPrice=fallback is null?null:prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==fallback.CanonicalModelKey)??throw new ReviewError(12,"price_missing");
             foreach(var criterion in profile.Criteria)
             {
                 var chunks=criterion.Scope=="relation"?[new Chunk("relation",sources.First(s=>s.Role=="target").Id,-1,0,0,0,0)]:p.Chunks;
@@ -90,6 +98,13 @@ public static class Planner
                     string body=WireAdapters.Build(reviewer,payload);string unit=Data.Hash(reviewer.Id+"\n"+criterion.Id+"\n"+chunk.Id);
                     var request=new RequestPlan(Data.Id("request"),unit,reviewer.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,body,Data.Hash(body),WireAdapters.Reservation(reviewer,price,body),criterion.Scope);
                     if(!live)_=SelectFixture(p,request);p.Requests.Add(request);
+                    if(fallback is not null)
+                    {
+                        // Same payload, other model: the fallback sees exactly what the primary would have seen.
+                        string fallbackBody=WireAdapters.Build(fallback,payload);
+                        var alternate=new RequestPlan(Data.Id("request"),Data.Hash(fallback.Id+"\n"+criterion.Id+"\n"+chunk.Id),fallback.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,fallbackBody,Data.Hash(fallbackBody),WireAdapters.Reservation(fallback,fallbackPrice!,fallbackBody),criterion.Scope,request.Id);
+                        if(!live)_=SelectFixture(p,alternate);p.Requests.Add(alternate);
+                    }
                 }
             }
         }

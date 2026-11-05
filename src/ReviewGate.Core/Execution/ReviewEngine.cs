@@ -34,8 +34,10 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         // Saved responses need no dispatch: they are settled from the response file and the pinned snapshot,
         // without a grant or unchanged originals, so an expired grant or an edited source cannot strand their hold.
         foreach(var saved in store.Attempts(run.Id).Where(a=>a.Phase=="response_saved").ToList())ProcessSaved(p,run,saved);
+        SettleFreeUnknowns(p,run);
         bool unknown=store.Attempts(run.Id).Any(a=>a.Phase=="unknown");
-        if(unknown)return new(13,SaveReport(p,run with{Status="needs_reconciliation",ErrorCode="reconciliation_required"},command)with{RequiredAction="reconcile_unknown_attempts"});
+        // An unknown covered by a pre-approved fallback does not block resuming; it still needs reconciliation at the end.
+        if(BlockingUnknown(p,run)||(recoverOnly&&unknown))return new(13,SaveReport(p,run with{Status="needs_reconciliation",ErrorCode="reconciliation_required"},command)with{RequiredAction="reconcile_unknown_attempts"});
         if(recoverOnly)return new(0,SaveReport(p,run with{Status=HasValidUnits(p,run)?"partial":"blocked",ErrorCode=null},command)with{RequiredAction="resume_after_recovery"});
         store.NewGeneration(run.Id);run=store.GetRun(run.Id);
         // Nothing left to dispatch: finishing the bundle needs no grant.
@@ -47,41 +49,31 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         try
         {
             if(store.Attempts(run.Id).Any(a=>a.CostUsd>a.ReservationUsd))throw new ReviewError(12,"reservation_overrun");
-            bool grantBound=false;
-            foreach(var request in p.Requests)
+            // Every key the plan may need (fallbacks included) is checked before anything is sent.
+            if(p.ExecutionMode=="live")foreach(var reviewer in p.Reviewers)Data.Require(live is not null&&live.HasCredential(reviewer.HostingProvider),"credential_missing",11);
+            foreach(var primary in p.Requests.Where(q=>q.FallbackFor is null))
             {
                 CheckCancel(run,cancellation);
-                if(store.Units(run.Id).Any(u=>u.UnitId==request.UnitId&&u.Valid))continue;
-                if(store.Attempts(run.Id).Any(a=>a.Phase=="unknown"))throw new ReviewError(13,"reconciliation_required");
-                // A request whose retries are used up stays incomplete without blocking the remaining requests.
-                if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));retryExhausted=true;continue;}
-                StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
-                var reviewer=p.Reviewers.Single(r=>r.Id==request.ReviewerId);
-                if(p.ExecutionMode=="live")
+                // A slot is the primary request plus its optional pre-approved fallback; a valid answer from either fills it.
+                var candidates=Slot(p,primary);
+                if(candidates.Any(q=>UnitValid(run,q)))continue;
+                if(BlockingUnknown(p,run))throw new ReviewError(13,"reconciliation_required");
+                for(int i=0;i<candidates.Count;i++)
                 {
-                    // A missing key is found before any reservation or dispatch, so it never leaves an unknown attempt.
-                    Data.Require(live is not null&&live.HasCredential(reviewer.HostingProvider),"credential_missing",11);
-                    // A hand-written grant file is not an approval: live grants must come from the interactive grant command.
-                    Data.Require(store.IsGrantIssued(grant),"grant_not_issued",10);
+                    var request=candidates[i];bool last=i==candidates.Count-1;
+                    // A candidate that already gave no answer hands over to the next; one that answered is never replaced.
+                    if(!last&&Unanswered(run,request))continue;
+                    // A request whose retries are used up stays incomplete without blocking the remaining requests.
+                    if(store.RetryExhausted(run,p,request,grant)){store.RecordUnit(run.Id,Invalid(p,request,"retry_exhausted"));retryExhausted=true;break;}
+                    var settled=await DispatchAsync(p,run,request,grant,cancellation);
+                    if(settled.CostUsd>settled.ReservationUsd)throw new ReviewError(12,"reservation_overrun");
+                    if(UnitValid(run,request))break;
+                    if(!last&&Unanswered(run,request))continue;
+                    if(settled.Phase=="unknown")throw new ReviewError(13,"reconciliation_required");
+                    if(settled.ErrorCode=="unauthorized")throw new ReviewError(11,"unauthorized");
+                    if(settled.ErrorCode is "rate_limited" or "error")throw new ReviewError(21,settled.ErrorCode);
+                    break;
                 }
-                // Bound in its own transaction before the first reservation, so a failed reservation cannot free it for another run.
-                if(!grantBound){store.BindGrant(run,p,grant);grantBound=true;}
-                var a=store.Reserve(run,p,request,grant);
-                Checkpoint("reserved");CheckCancel(run,cancellation);
-                StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
-                Data.Require(store.Now>=p.Prices.EffectiveFrom&&store.Now<p.Prices.EffectiveTo,"price_snapshot_expired",12);
-                store.Dispatch(a.Id);Checkpoint("dispatch_intent");
-                var (wire,http)=p.ExecutionMode=="live"?await SendLive(run,a,reviewer,request,cancellation):await SendFixture(p,run,a,reviewer,request,cancellation);
-                if(http>=400)wire=WireAdapters.RedactErrorBody(wire);
-                store.SaveResponse(a,new(a.Id,request.Id,p.Hash,wire,http));
-                Checkpoint("response_saved");
-                ProcessSaved(p,run,store.Attempts(run.Id).Single(x=>x.Id==a.Id));
-                Checkpoint("settled");
-                var settled=store.Attempts(run.Id).Single(x=>x.Id==a.Id);
-                if(settled.Phase=="unknown")throw new ReviewError(13,"reconciliation_required");
-                if(settled.ErrorCode=="unauthorized")throw new ReviewError(11,"unauthorized");
-                if(settled.ErrorCode is "rate_limited" or "error")throw new ReviewError(21,settled.ErrorCode);
-                if(settled.CostUsd>settled.ReservationUsd)throw new ReviewError(12,"reservation_overrun");
             }
         }
         catch(OperationCanceledException){exit=130;error="cancelled";}
@@ -89,7 +81,7 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         // Skipped retry-exhausted requests are a request-limit shortfall (contract exit 12), not a plain partial.
         if(exit==0&&retryExhausted){exit=12;error="retry_limit_reached";}
         // A known pre-dispatch cancellation leaves a reserved row that can safely be released.
-        store.Recover(run,p);
+        store.Recover(run,p);SettleFreeUnknowns(p,run);
         var coverage=CoverageFor(p,store.Units(run.Id));var attempts=store.Attempts(run.Id);
         string status;
         if(attempts.Any(a=>a.Phase=="unknown")){status="needs_reconciliation";exit=13;error="reconciliation_required";}
@@ -101,6 +93,67 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         return new(exit,envelope);
     }
     void CheckCancel(RunRow run,CancellationToken ct){ct.ThrowIfCancellationRequested();if(store.CancelRequested(run))throw new OperationCanceledException();}
+    static List<RequestPlan> Slot(Plan p,RequestPlan primary)=>[primary,..p.Requests.Where(q=>q.FallbackFor==primary.Id)];
+    bool UnitValid(RunRow run,RequestPlan q)=>store.Units(run.Id).Any(u=>u.UnitId==q.UnitId&&u.Valid);
+    // "No answer": the latest attempt is unknown (timeout, lost connection, cost unknown) or settled without a usable
+    // reply because the provider was busy or failing (429/5xx). A cancelled send is not handed over to a fallback.
+    bool Unanswered(RunRow run,RequestPlan q)
+    {
+        var a=store.Attempts(run.Id).LastOrDefault(x=>x.RequestId==q.Id&&x.Phase!="released");
+        if(a is null||a.ErrorCode=="cancelled_in_flight")return false;
+        if(a.Phase=="unknown")return true;
+        var u=store.Units(run.Id).SingleOrDefault(x=>x.RequestId==q.Id);
+        return a.Phase=="settled"&&(u is null||u is {Valid:false,ValidationState:"failed",ErrorCode:"rate_limited" or "error"});
+    }
+    // An unknown attempt stops new dispatch unless a pre-approved fallback stands behind it in the same slot.
+    bool BlockingUnknown(Plan p,RunRow run)=>store.Attempts(run.Id).Where(a=>a.Phase=="unknown").Any(a=>
+    {
+        var q=p.Requests.Single(x=>x.Id==a.RequestId);var slot=Slot(p,p.Requests.Single(x=>x.Id==(q.FallbackFor??q.Id)));
+        return a.ErrorCode=="cancelled_in_flight"||slot[^1].Id==q.Id;
+    });
+    // When every rate for the model is zero (a free tier), any usage costs nothing, so an unknown attempt is settled at 0
+    // from the pinned price snapshot instead of waiting for manual reconciliation.
+    void SettleFreeUnknowns(Plan p,RunRow run)
+    {
+        foreach(var a in store.Attempts(run.Id).Where(a=>a.Phase=="unknown"))
+        {
+            var reviewer=p.Reviewers.Single(r=>r.Id==p.Requests.Single(q=>q.Id==a.RequestId).ReviewerId);
+            var price=p.Prices.Prices.Single(x=>x.CanonicalModelKey==reviewer.CanonicalModelKey);
+            if(price is {InputPerMillion:0,CachedInputPerMillion:0,OutputPerMillion:0}&&(price.OutputIncludesReasoning||price.ReasoningPerMillion==0))store.SettleZeroPrice(a.Id);
+        }
+    }
+    async Task<AttemptRow> DispatchAsync(Plan p,RunRow run,RequestPlan request,Grant grant,CancellationToken cancellation)
+    {
+        StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
+        var reviewer=p.Reviewers.Single(r=>r.Id==request.ReviewerId);
+        if(p.ExecutionMode=="live")
+        {
+            // A missing key is found before any reservation or dispatch, so it never leaves an unknown attempt.
+            Data.Require(live is not null&&live.HasCredential(reviewer.HostingProvider),"credential_missing",11);
+            // A hand-written grant file is not an approval: live grants must come from the interactive grant command.
+            Data.Require(store.IsGrantIssued(grant),"grant_not_issued",10);
+        }
+        // Bound in its own transaction before the first reservation, so a failed reservation cannot free it for another run.
+        store.BindGrant(run,p,grant);
+        var a=store.Reserve(run,p,request,grant);
+        Checkpoint("reserved");CheckCancel(run,cancellation);
+        StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
+        Data.Require(store.Now>=p.Prices.EffectiveFrom&&store.Now<p.Prices.EffectiveTo,"price_snapshot_expired",12);
+        store.Dispatch(a.Id);Checkpoint("dispatch_intent");
+        try
+        {
+            var (wire,http)=p.ExecutionMode=="live"?await SendLive(run,a,reviewer,request,cancellation):await SendFixture(p,run,a,reviewer,request,cancellation);
+            if(http>=400)wire=WireAdapters.RedactErrorBody(wire);
+            store.SaveResponse(a,new(a.Id,request.Id,p.Hash,wire,http));
+            Checkpoint("response_saved");
+            ProcessSaved(p,run,store.Attempts(run.Id).Single(x=>x.Id==a.Id));
+            Checkpoint("settled");
+        }
+        // The send already recorded the attempt as unknown; the caller decides between fallback and stopping.
+        catch(ReviewError e)when(e.Code=="reconciliation_required"){}
+        SettleFreeUnknowns(p,run);
+        return store.Attempts(run.Id).Single(x=>x.Id==a.Id);
+    }
     async Task<(string Wire,int Http)> SendFixture(Plan p,RunRow run,AttemptRow a,ReviewerProfile reviewer,RequestPlan request,CancellationToken cancellation)
     {
         var fixture=Planner.SelectFixture(p,request);
@@ -209,17 +262,20 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
     {
         SourceReader.VerifyPartition(p.Sources.Where(s=>s.Role=="target"),p.Chunks);
         Data.Require(p.Requests.Select(q=>q.UnitId).Distinct().Count()==p.Requests.Count,"duplicate_unit",13);
-        var valid=p.Requests.Where(q=>units.Any(u=>u.UnitId==q.UnitId&&u.RequestId==q.Id&&u.Valid&&u.Exposure=="raw"&&u.TransportState==Transport(p)&&u.ValidationState=="valid"&&u.ReviewDisposition is "finding" or "no_finding")).ToList();
-        long total=p.Requests.Sum(q=>(long)CoreBytes(p,q)),done=valid.Sum(q=>(long)CoreBytes(p,q));
+        // Required work is the primary requests; a slot counts as done when the primary or its pre-approved fallback is valid.
+        bool Answered(RequestPlan q)=>units.Any(u=>u.UnitId==q.UnitId&&u.RequestId==q.Id&&u.Valid&&u.Exposure=="raw"&&u.TransportState==Transport(p)&&u.ValidationState=="valid"&&u.ReviewDisposition is "finding" or "no_finding");
+        var primaries=p.Requests.Where(q=>q.FallbackFor is null).ToList();
+        var valid=primaries.Where(q=>Slot(p,q).Any(Answered)).ToList();
+        long total=primaries.Sum(q=>(long)CoreBytes(p,q)),done=valid.Sum(q=>(long)CoreBytes(p,q));
         var validIds=valid.Select(q=>q.Id).ToHashSet();bool live=p.ExecutionMode=="live";decimal? ratio=total==0?null:(decimal)done/total;
-        var pairs=p.Requests.GroupBy(q=>(q.CriterionId,q.ReviewerId,q.Stage)).Select(g=>
+        var pairs=primaries.GroupBy(q=>(q.CriterionId,q.ReviewerId,q.Stage)).Select(g=>
         {
             long pairTotal=g.Sum(q=>(long)CoreBytes(p,q)),pairDone=g.Where(q=>validIds.Contains(q.Id)).Sum(q=>(long)CoreBytes(p,q));
             decimal? pairRatio=pairTotal==0?null:(decimal)pairDone/pairTotal;
             return new PairCoverage(g.Key.CriterionId,g.Key.ReviewerId,g.Key.Stage,g.Count(),g.Count(q=>validIds.Contains(q.Id)),pairTotal,pairDone,live?null:pairRatio,live?pairRatio:null);
         }).ToList();
         var empty=p.Sources.Where(s=>s.Role=="target"&&s.ByteLength==0).Select(s=>s.Id).ToList();
-        return new(p.Requests.Count,valid.Count,total,done,live?null:ratio,live?ratio:null,valid.Count==p.Requests.Count,p.Requests.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
+        return new(primaries.Count,valid.Count,total,done,live?null:ratio,live?ratio:null,valid.Count==primaries.Count,primaries.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
     }
     bool HasValidUnits(Plan p,RunRow run)=>CoverageFor(p,store.Units(run.Id)).ValidUnits>0;
     public Envelope View(string runId,string command="status")

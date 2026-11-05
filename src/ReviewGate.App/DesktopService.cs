@@ -18,8 +18,13 @@ public record ModelOption(string Id, string Provider, string ModelId, string Can
         $"입력 ${InputPerMillion!.Value.ToString(CultureInfo.InvariantCulture)} / 출력 ${OutputPerMillion!.Value.ToString(CultureInfo.InvariantCulture)} (100만 token)";
     public string Display => $"{Provider} · {ModelId}{(Custom ? " (사용자 추가)" : "")}";
 }
-public record DesktopSettings(string SchemaVersion, bool GoogleFreeTier, Dictionary<string, string> DefaultModels);
-public record QuickTestRequest(List<string> ReviewerIds, string ProfileKind, string Instruction, string? Text, string? SourcePath, bool ConfirmedNonSensitive);
+// Per provider: the primary model and an optional fallback used only when the primary gives no answer.
+public record DesktopSettings(string SchemaVersion, bool GoogleFreeTier, Dictionary<string, string> DefaultModels, Dictionary<string, string>? FallbackModels = null);
+public record ProviderKeys(ProviderInfo Provider, IReadOnlyList<CredentialEntry> Keys)
+{
+    public string Status => Keys.SingleOrDefault(k => k.Active) is { } active ? $"사용 중: {active.Name}" : Keys.Count == 0 ? "키 없음" : "사용할 키를 선택하세요";
+}
+public record QuickTestRequest(List<string> ReviewerIds, string ProfileKind, string Instruction, string? Text, string? SourcePath, bool ConfirmedNonSensitive, List<string?>? FallbackIds = null);
 public record QuickPreview(string PlanId, string Mode, int Requests, decimal ReservationUsd, List<string> Recipients, List<string> Warnings, int SourceFiles, long SourceBytes, List<string> Exclusions);
 public record FindingView(string Reviewer, string Kind, string Severity, string Location, string Claim, string Detail, string Quote, string Evidence);
 public record QuickResult(string? RunId, string Status, string? ErrorCode, decimal UsageUsd, decimal UnknownHoldUsd, decimal? ProcessingRatio,
@@ -32,7 +37,7 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     Func<HttpMessageHandler?>? handler = null, Func<DateTimeOffset>? clock = null)
 {
     public const string Project = "desktop";
-    public static readonly string[] Providers = ["openai", "together", "google"];
+    public static IEnumerable<string> Providers => ProviderCatalog.Ids;
     public const string SampleCode = "// ReviewGate connection test sample.\nint total = 0;\nfor (int i = 0; i <= 10; i++) total += i;\nConsole.WriteLine(total / 0);\n";
     string DesktopDir => Path.Combine(Path.GetFullPath(stateRoot), "desktop");
     string SettingsFile => Path.Combine(DesktopDir, "settings.json");
@@ -40,19 +45,22 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     string CustomPricesFile => Path.Combine(DesktopDir, "custom-prices.json");
     StateStore Open() => new(stateRoot, clock, "live");
 
-    // ---- API keys: presence only; values are written once and never read back to the UI.
-    public Dictionary<string, bool> CredentialStatus() => Providers.ToDictionary(p => p, p => credentials.Read(p) is { Length: > 0 });
-    public void SaveKey(string provider, string key) { Data.Require(Providers.Contains(provider), "unsupported_provider"); credentials.Write(provider, key); }
-    public bool DeleteKey(string provider) { Data.Require(Providers.Contains(provider), "unsupported_provider"); return credentials.Delete(provider); }
+    // ---- API keys: names and which one is active; values are written once and never read back to the UI.
+    public List<ProviderKeys> Keys() => ProviderCatalog.All.Select(p => new ProviderKeys(p, credentials.List(p.Id))).ToList();
+    public Dictionary<string, bool> CredentialStatus() => ProviderCatalog.Ids.ToDictionary(p => p, p => credentials.List(p).Any(k => k.Active));
+    public string AddKey(string provider, string name, string key) => credentials.Add(ProviderCatalog.Get(provider).Id, name, key);
+    public bool RemoveKey(string provider, string keyId) => credentials.Remove(ProviderCatalog.Get(provider).Id, keyId);
+    public void ActivateKey(string provider, string keyId) => credentials.Activate(ProviderCatalog.Get(provider).Id, keyId);
 
     // ---- Settings and models.
     public DesktopSettings LoadSettings()
     {
-        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash" });
+        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash" },
+            new() { ["google"] = "google-gemini-3.5-flash-lite" });
         if (!File.Exists(SettingsFile)) return defaults;
         var saved = Data.Read<DesktopSettings>(SettingsFile);
         foreach (var (provider, model) in defaults.DefaultModels) saved.DefaultModels.TryAdd(provider, model);
-        return saved;
+        return saved with { FallbackModels = saved.FallbackModels ?? defaults.FallbackModels };
     }
     public void SaveSettings(DesktopSettings settings) => Replace(SettingsFile, Data.Json(settings));
     public List<ModelOption> Models()
@@ -65,17 +73,17 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             var r = Data.Read<ReviewerProfile>(x.f);
             var row = prices.Prices.SingleOrDefault(p => p.CanonicalModelKey == r.CanonicalModelKey);
             return new ModelOption(r.Id, r.HostingProvider, r.ModelId, r.CanonicalModelKey, x.f, x.Item2, row?.InputPerMillion, row?.OutputPerMillion, row?.Tier, r.MaxOutputTokens, r.ReasoningEffort);
-        }).OrderBy(m => Array.IndexOf(Providers, m.Provider)).ThenBy(m => m.Custom).ThenBy(m => m.ModelId, StringComparer.OrdinalIgnoreCase).ToList();
+        }).OrderBy(m => ProviderCatalog.Ids.ToList().IndexOf(m.Provider)).ThenBy(m => m.Custom).ThenBy(m => m.ModelId, StringComparer.OrdinalIgnoreCase).ToList();
     }
     // A user-added model gets its own reviewer profile and price row. Prices are what the user typed (or free);
     // they are recorded as user-entered, not verified against the provider's price page.
     public ModelOption AddCustomModel(string provider, string modelId, bool free, decimal inputPerMillion = 0, decimal outputPerMillion = 0)
     {
-        Data.Require(Providers.Contains(provider), "unsupported_provider");
+        provider = ProviderCatalog.Get(provider).Id;
         modelId = modelId.Trim();Data.Require(Regex.IsMatch(modelId, "^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$"), "invalid_model_id");
         Data.Require(free || (inputPerMillion > 0 && outputPerMillion > 0), "price_required");
         string slug = modelId.ToLowerInvariant(), id = "custom-" + provider + "-" + Regex.Replace(slug, "[^a-z0-9.-]", "-");
-        var reviewer = new ReviewerProfile(Data.Version, id, provider, modelId, provider switch { "openai" => "responses", "together" => "chat_completions", _ => "interactions" },
+        var reviewer = new ReviewerProfile(Data.Version, id, provider, modelId, ProviderCatalog.Get(provider).ApiProfile,
             provider + "/" + slug, "unknown", "", 16384, 4096, provider == "google" ? 8192 : 0, 65536, null, 300);
         WireAdapters.Validate(reviewer);
         var rows = File.Exists(CustomPricesFile) ? Data.Read<List<PriceRow>>(CustomPricesFile) : [];
@@ -118,8 +126,11 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         Data.Require(request.ProfileKind is "code" or "document" or "novel", "invalid_profile");
         Data.Require(!string.IsNullOrWhiteSpace(request.Instruction), "instruction_required");
         var models = Models();
-        var reviewers = request.ReviewerIds.Select(id => models.SingleOrDefault(m => m.Id == id) ?? throw new ReviewError(2, "unknown_model")).ToList();
-        Data.Require(reviewers.All(m => m.Priced), "price_missing", 12);
+        ModelOption Find(string id) => models.SingleOrDefault(m => m.Id == id) ?? throw new ReviewError(2, "unknown_model");
+        var reviewers = request.ReviewerIds.Select(Find).ToList();
+        var fallbacks = (request.FallbackIds ?? []).Select(id => id is null ? null : Find(id)).ToList();
+        Data.Require(fallbacks.Count <= reviewers.Count, "fallback_count_mismatch");
+        Data.Require(reviewers.Concat(fallbacks.OfType<ModelOption>()).All(m => m.Priced), "price_missing", 12);
         string root; List<string> inputs;
         if (request.Text is { Length: > 0 } text)
         {
@@ -135,16 +146,18 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         }
         using var store = Open();
         var plan = Planner.Build(store, new(Project, root, null, "nonsensitive", request.Instruction, Path.Combine(profilesRoot, request.ProfileKind + ".json"),
-            reviewers.Select(m => m.File).ToList(), Path.Combine(profilesRoot, "budget-live.json"), MergedPrices().Path, null, inputs, [], reviewers.Count == 2 ? "independent" : "single"));
+            reviewers.Select(m => m.File).ToList(), Path.Combine(profilesRoot, "budget-live.json"), MergedPrices().Path, null, inputs, [], reviewers.Count == 2 ? "independent" : "single",
+            FallbackReviewerFiles: fallbacks.Select(m => m?.File).ToList()));
         var warnings = new List<string>();
-        foreach (var m in reviewers)
+        foreach (var m in reviewers.Concat(fallbacks.OfType<ModelOption>()))
         {
             if (m.Free) warnings.Add($"{m.Provider} {m.ModelId}: 무료 티어 — 제공자가 보낸 내용을 제품 개선에 쓰고 사람이 검토할 수 있습니다. 비공개·회사 자료는 보내지 마세요.");
             if (m.Provider == "together") warnings.Add("Together: store 옵션을 무시합니다. 보관 여부는 Together 계정 설정을 따릅니다.");
             if (m.Custom) warnings.Add($"{m.ModelId}: 사용자가 추가한 모델이며 가격은 사용자가 입력한 값입니다.");
         }
         return new(plan.Id, plan.Mode, plan.Requests.Count, plan.Requests.Sum(r => r.ReservationUsd),
-            reviewers.Select(m => $"{m.Provider} {m.ModelId} → {HttpTransport.Endpoints[m.Provider]}").ToList(), warnings,
+            reviewers.SelectMany((m, i) => new[] { $"{m.Provider} {m.ModelId} → {HttpTransport.Endpoints[m.Provider]}" }
+                .Concat(i < fallbacks.Count && fallbacks[i] is { } f ? [$"   응답이 없으면 서브: {f.Provider} {f.ModelId} → {HttpTransport.Endpoints[f.Provider]}"] : Array.Empty<string>())).ToList(), warnings,
             plan.Sources.Count(s => s.Role == "target"), plan.Sources.Sum(s => (long)s.ByteLength), plan.Exclusions.Select(e => $"{e.Path} ({e.Reason})").ToList());
     }
     // The desktop confirmation dialog is the approval channel; like the CLI prompt it is a local confirmation,

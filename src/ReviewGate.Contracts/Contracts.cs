@@ -113,7 +113,7 @@ public record Chunk(string Id, string SourceId, int Index, int Start, int End, i
 public record SpanRef(string SourceId, int Start, int End);
 public record RequestPlan(string Id, string UnitId, string ReviewerId, string CriterionId,
     string SourceId, int ChunkIndex, List<SpanRef> AllowedSpans, string Body, string BodyHash,
-    decimal ReservationUsd, string Stage);
+    decimal ReservationUsd, string Stage, string? FallbackFor = null);
 public sealed record Plan
 {
     public string SchemaVersion { get; init; } = Data.Version;
@@ -136,6 +136,8 @@ public sealed record Plan
     public required PriceSnapshot Prices { get; init; }
     public required FixtureBundle Fixture { get; init; }
     public List<ReviewerProfile> Reviewers { get; init; } = [];
+    // Primary reviewer id → pre-approved fallback reviewer id, used only when the primary gives no answer.
+    public Dictionary<string, string> Fallbacks { get; init; } = [];
     public List<InputPin> Pins { get; init; } = [];
     public List<InputPin> DirectoryPins { get; init; } = [];
     public List<SourceFile> Sources { get; init; } = [];
@@ -198,10 +200,37 @@ public interface IModelTransport
     bool HasCredential(string provider);
     Task<TransportResult> SendAsync(ReviewerProfile reviewer, string body, CancellationToken cancellation);
 }
+// A provider can hold several named keys; exactly one is active and used for requests. Values are never listed.
+public record CredentialEntry(string Id, string Name, bool Active, DateTimeOffset? Saved);
 public interface ICredentialStore
 {
     string? Read(string provider);
-    void Write(string provider, string secret);
-    bool Delete(string provider);
+    IReadOnlyList<CredentialEntry> List(string provider);
+    string Add(string provider, string name, string secret);
+    bool Remove(string provider, string id);
+    void Activate(string provider, string id);
+}
+// Raw secret storage (Windows Credential Manager in the product, memory in tests). Targets are opaque names.
+public record VaultItem(string Target, string UserName, DateTimeOffset? Written);
+public interface ICredentialVault
+{
+    string? Read(string target);
+    void Write(string target, string userName, string secret);
+    bool Delete(string target);
+    IReadOnlyList<VaultItem> Enumerate(string prefix);
+}
+// Every provider the product can call. Adding a provider means adding one entry here plus its wire adapter;
+// the CLI, key screens and model screens read this list instead of hard-coding provider names.
+public record ProviderInfo(string Id, string DisplayName, string ApiProfile, string Endpoint, string KeyHeader);
+public static class ProviderCatalog
+{
+    public static readonly IReadOnlyList<ProviderInfo> All =
+    [
+        new("openai", "OpenAI", "responses", "https://api.openai.com/v1/responses", "Authorization: Bearer"),
+        new("together", "Together AI", "chat_completions", "https://api.together.ai/v1/chat/completions", "Authorization: Bearer"),
+        new("google", "Google AI", "interactions", "https://generativelanguage.googleapis.com/v1beta/interactions", "x-goog-api-key"),
+    ];
+    public static IEnumerable<string> Ids => All.Select(p => p.Id);
+    public static ProviderInfo Get(string id) => All.SingleOrDefault(p => p.Id == id) ?? throw new ReviewError(2, "unsupported_provider");
 }
 public record CommandResult(int ExitCode, Envelope Result, string? OutputPath = null);

@@ -11,12 +11,8 @@ public sealed class HttpTransport : IModelTransport, IDisposable
 {
     public const string GoogleApiRevision = "2026-05-20";
     public const int MaxResponseBytes = 8 * 1024 * 1024;
-    public static readonly IReadOnlyDictionary<string, Uri> Endpoints = new Dictionary<string, Uri>
-    {
-        ["openai"] = new("https://api.openai.com/v1/responses"),
-        ["together"] = new("https://api.together.ai/v1/chat/completions"),
-        ["google"] = new("https://generativelanguage.googleapis.com/v1beta/interactions"),
-    };
+    // Fixed endpoints come only from the provider catalog; nothing in a plan or response can change them.
+    public static readonly IReadOnlyDictionary<string, Uri> Endpoints = ProviderCatalog.All.ToDictionary(p => p.Id, p => new Uri(p.Endpoint));
     readonly ICredentialStore credentials;
     readonly HttpClient client;
     public HttpTransport(ICredentialStore credentials, HttpMessageHandler? handler = null)

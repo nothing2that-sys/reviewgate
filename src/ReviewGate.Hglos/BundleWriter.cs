@@ -83,9 +83,12 @@ public static class HglosExporter
     public const string CompleteRawName="hglos.findings.synthetic.json",PartialRawName="hglos.findings.partial.synthetic.json";
     public static string RawName(bool live,bool partial)=>live?(partial?"hglos.findings.partial.live.json":"hglos.findings.live.json"):(partial?PartialRawName:CompleteRawName);
     static bool StateHeld(string s)=>s is "unknown" or "reserved" or "dispatch_intent" or "response_saved";
-    public static object Independence(Plan p)=>new{input_isolation=p.Mode=="independent",distinct_reviewer=p.Reviewers.Count==2&&p.Reviewers.Select(r=>r.Id).Distinct().Count()==2,
-        distinct_model=p.Reviewers.Count==2&&p.Reviewers.Select(r=>r.CanonicalModelKey).Distinct().Count()==2,
-        distinct_developer=p.Reviewers.Count!=2||(p.Reviewers.Any(r=>r.ModelDeveloper.Trim().Equals("unknown",StringComparison.OrdinalIgnoreCase)))?(bool?)null:p.Reviewers.Select(r=>r.ModelDeveloper.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count()==2,
+    public static object Independence(Plan p)=>Independence(p,p.Reviewers.Where(r=>!p.Fallbacks.ContainsValue(r.Id)).ToList());
+    // Independence is judged on the primary reviewers; fallbacks are listed separately and checked to be different models.
+    static object Independence(Plan p,List<ReviewerProfile> primaries)=>new{input_isolation=p.Mode=="independent",distinct_reviewer=primaries.Count==2&&primaries.Select(r=>r.Id).Distinct().Count()==2,
+        distinct_model=primaries.Count==2&&primaries.Select(r=>r.CanonicalModelKey).Distinct().Count()==2,
+        distinct_developer=primaries.Count!=2||(primaries.Any(r=>r.ModelDeveloper.Trim().Equals("unknown",StringComparison.OrdinalIgnoreCase)))?(bool?)null:primaries.Select(r=>r.ModelDeveloper.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count()==2,
+        fallbacks=p.Fallbacks,
         canonical_model_key_source="declared_reviewer_file_not_verified_registry",
         evaluation_scope=p.ExecutionMode=="live"?"live_model_review":"synthetic_fixture",shared_fixture_id=p.ExecutionMode=="live"?null:p.Fixture.Id};
 }
