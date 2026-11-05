@@ -81,6 +81,24 @@ public sealed class RecoveryRegressionTests
         Assert.Equal(12,r.ExitCode);Assert.Equal("price_snapshot_expired",r.Result.RunErrorCode);Assert.Equal("released",s.Attempts().Single().Phase);
     }
 #endif
+    [Fact] public async Task ExpiredSnapshotStopsPaidPlansButNotAllZeroPricePlans()
+    {
+        DateTimeOffset clock=new(2026,12,10,0,0,0,TimeSpan.Zero),expired=new(2026,11,30,15,0,0,TimeSpan.Zero);
+        using(var e=new TestEnvironment())
+        {
+            // Free tier / CLI subscription: every rate is zero, so the old window cannot make the budget wrong.
+            e.Put("prices.json",new PriceSnapshot(Data.Version,"test",expired.AddDays(-30),expired.AddDays(-30),expired,"synthetic",Data.Hash("test"),[new("fixture/a",0,0)]));
+            using var s=new StateStore(e.State,()=>clock);var p=e.MakePlan(s);
+            var r=await new ReviewEngine(s).ExecuteAsync(p,e.Grant(p)with{ExpiresAt=clock.AddHours(1)});
+            Assert.Equal(0,r.ExitCode);Assert.Equal("settled",s.Attempts().Single().Phase);Assert.Equal(0m,s.Attempts().Single().CostUsd);
+        }
+        using(var e=new TestEnvironment())
+        {
+            e.Put("prices.json",new PriceSnapshot(Data.Version,"test",expired.AddDays(-30),expired.AddDays(-30),expired,"synthetic",Data.Hash("test"),[new("fixture/a",1,2)]));
+            using var s=new StateStore(e.State,()=>clock);
+            Assert.Equal("price_snapshot_unavailable",Assert.Throws<ReviewError>(()=>e.MakePlan(s)).Code);Assert.Empty(s.Attempts());
+        }
+    }
     [Fact] public void ReservationCoversRequestBytesWhenDeclaredBoundIsTooSmall()
     {
         using var e=new TestEnvironment();e.Put("reviewer.json",e.Reviewer with{InputTokenUpperBound=1,MaxOutputTokens=1});using var s=e.Store();var p=e.MakePlan(s);var r=p.Requests.Single();

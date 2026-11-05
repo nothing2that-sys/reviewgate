@@ -45,7 +45,8 @@ public static class Planner
         Data.Require(budget.Currency=="USD"&&budget.Timezone=="+09:00"&&budget.RunUsd>0&&budget.ProjectUsd>0&&budget.MonthUsd>0&&budget.MaxRequests>0&&budget.MaxRetries>=0,"invalid_budget");
         var prices=Data.Read<PriceSnapshot>(input.PriceFile);Data.VersionIs(prices.SchemaVersion);
         Data.Require(prices.Prices is not null&&prices.Prices.Count>0&&prices.Currency=="USD"&&prices.RetrievedAt!=default&&!string.IsNullOrWhiteSpace(prices.Source)
-            &&Regex.IsMatch(prices.DocumentSha256??"", "^[a-fA-F0-9]{64}$")&&prices.EffectiveFrom<=store.Now&&store.Now<prices.EffectiveTo,"price_snapshot_unavailable",12);
+            &&Regex.IsMatch(prices.DocumentSha256??"", "^[a-fA-F0-9]{64}$")
+            &&(PriceRules.InWindow(prices,store.Now)||PriceRules.AllZero(prices,everyone.Select(r=>r.CanonicalModelKey))),"price_snapshot_unavailable",12);
         Data.Require(prices.Prices.Select(x=>x.CanonicalModelKey).Distinct().Count()==prices.Prices.Count,"ambiguous_prices",12);
         foreach(var price in prices.Prices)Data.Require(price.InputPerMillion>=0&&price.OutputPerMillion>=0&&price.CachedInputPerMillion>=0&&price.ReasoningPerMillion>=0,"invalid_price",12);
         foreach(var r in everyone.Where(r=>live&&r.HostingProvider=="google"))

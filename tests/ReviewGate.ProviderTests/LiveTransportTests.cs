@@ -218,20 +218,23 @@ public sealed class LiveTransportTests
     {
         string profiles = Path.Combine(TestEnvironment.Repository, "profiles");
         var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(11, reviewers.Length);
+        // Every shipped snapshot, inside its own window (December doubles gemini-4-argon).
+        foreach (var (day, snapshot) in new[] { (new DateTimeOffset(2026, 11, 10, 0, 0, 0, TimeSpan.Zero), "live-2026-11-04"), (new DateTimeOffset(2026, 12, 10, 0, 0, 0, TimeSpan.Zero), "live-2026-12-01") })
         foreach (var reviewer in reviewers)
         {
             using var e = new TestEnvironment();
-            using var store = new StateStore(e.State, () => new DateTimeOffset(2026, 11, 10, 0, 0, 0, TimeSpan.Zero), "live");
+            using var store = new StateStore(e.State, () => day, "live");
             // gemini-3.5-flash has no verified paid price; it is shipped for free-tier use with the free snapshot only.
             bool freeOnly = reviewer.Contains("3.5-flash");
-            var prices = Path.Combine(profiles, "prices", freeOnly ? "live-2026-11-04-google-free.json" : "live-2026-11-04.json");
+            var prices = Path.Combine(profiles, "prices", snapshot + (freeOnly ? "-google-free.json" : ".json"));
             var plan = Planner.Build(store, new("smoke", e.Source, e.Source, "nonsensitive", "Review supplied source", Path.Combine(profiles, "code.json"), [reviewer], Path.Combine(profiles, "budget-live.json"), prices, null, ["Sample.cs"], []));
             var request = Assert.Single(plan.Requests);
             // Agent CLIs run on the signed-in subscription: no token price, nothing reserved.
             if (freeOnly || reviewer.Contains("-cli")) { Assert.Equal(0m, request.ReservationUsd); continue; }
             // The reservation is the declared worst case (full input, output and thinking bounds), not an expected charge.
-            // One small file stays well under the 1 USD run budget; the low-cost models stay under 10 cents.
-            Assert.InRange(request.ReservationUsd, 0.0001m, 0.5m);
+            // One small file fits the 1 USD run budget on its own (gemini-4-argon at the December price reserves about 0.56);
+            // the low-cost models stay under 10 cents.
+            Assert.InRange(request.ReservationUsd, 0.0001m, 0.6m);
             if (reviewer.Contains("luna") || reviewer.Contains("glm") || reviewer.Contains("3.8-flash")) Assert.True(request.ReservationUsd < 0.10m, reviewer);
         }
     }

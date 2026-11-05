@@ -133,7 +133,7 @@ public sealed class StateStore : IDisposable
     public AttemptRow Reserve(RunRow run,Plan plan,RequestPlan request,Grant grant)
     {
         CheckGrant(grant,plan,run,Now);
-        Data.Require(Now>=plan.Prices.EffectiveFrom&&Now<plan.Prices.EffectiveTo,"price_snapshot_expired",12);
+        Data.Require(PriceRules.Usable(plan,Now),"price_snapshot_expired",12);
         using var tx=db.BeginTransaction();
         BindGrant(run,grant,tx);
         string monthly=plan.Budget.MonthUsd.ToString(CultureInfo.InvariantCulture);

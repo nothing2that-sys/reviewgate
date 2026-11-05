@@ -84,6 +84,17 @@ public record BudgetPolicy(string SchemaVersion, decimal RunUsd, decimal Project
 public record PriceRow(string CanonicalModelKey, decimal InputPerMillion, decimal OutputPerMillion,
     decimal CachedInputPerMillion = 0, bool OutputIncludesReasoning = true, decimal ReasoningPerMillion = 0,
     string Tier = "standard", string Region = "global");
+// Price validity: a snapshot is trusted only inside its effective window, because budget caps and settled costs depend
+// on it. A plan whose every model has all-zero rates (free tier, CLI subscription) costs nothing at any price, so it is
+// not stopped by the window; one paid model in the plan brings the window back.
+public static class PriceRules
+{
+    public static bool IsZero(PriceRow r) => r is { InputPerMillion: 0, CachedInputPerMillion: 0, OutputPerMillion: 0 } && (r.OutputIncludesReasoning || r.ReasoningPerMillion == 0);
+    public static bool AllZero(PriceSnapshot prices, IEnumerable<string> canonicalModelKeys) =>
+        canonicalModelKeys.All(k => prices.Prices.SingleOrDefault(x => x.CanonicalModelKey == k) is { } row && IsZero(row));
+    public static bool InWindow(PriceSnapshot prices, DateTimeOffset now) => prices.EffectiveFrom <= now && now < prices.EffectiveTo;
+    public static bool Usable(Plan p, DateTimeOffset now) => InWindow(p.Prices, now) || AllZero(p.Prices, p.Reviewers.Select(r => r.CanonicalModelKey));
+}
 public record PriceSnapshot(string SchemaVersion, string Id, DateTimeOffset RetrievedAt,
     DateTimeOffset EffectiveFrom, DateTimeOffset EffectiveTo, string Source, string DocumentSha256,
     List<PriceRow> Prices, string Currency = "USD");

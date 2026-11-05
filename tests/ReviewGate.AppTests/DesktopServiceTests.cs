@@ -91,6 +91,25 @@ public sealed class DesktopServiceTests
         app.SaveSettings(app.LoadSettings() with { GoogleFreeTier = false });
         var paid = app.Models();Assert.False(paid.Single(m => m.Id == "google-gemini-3.5-flash").Priced);Assert.Equal(0.75m, paid.Single(m => m.Id == "google-gemini-3.8-flash").InputPerMillion);
     }
+    [Fact] public void PriceSnapshotFollowsTheDateAndArgonHasNoFreeTier()
+    {
+        string folder = Path.Combine(Profiles, "prices");
+        Assert.Equal("live-2026-11-04", DesktopService.ShippedPrices(folder, false, Clock).Id);
+        Assert.Equal("live-2026-12-01-google-free", DesktopService.ShippedPrices(folder, true, new(2026, 12, 5, 0, 0, 0, TimeSpan.Zero)).Id);
+        // gemini-4-argon is "not available on the Free tier": it keeps a paid price even with the free-tier setting.
+        using var e = new TestEnvironment();var app = Service(e, new());
+        Assert.False(app.Models().Single(m => m.Id == "google-gemini-4-argon").Free);
+        var december = new DesktopService(e.State, Profiles, new FakeCredentials(), clock: () => new(2026, 12, 5, 0, 0, 0, TimeSpan.Zero), locateCli: _ => null);
+        Assert.Equal(4.00m, december.Models().Single(m => m.Id == "google-gemini-4-argon").InputPerMillion);
+    }
+    [Fact] public void AfterTheLastSnapshotOnlyAllZeroPricePlansCanBePrepared()
+    {
+        using var e = new TestEnvironment();
+        var app = new DesktopService(e.State, Profiles, new FakeCredentials(), clock: () => new(2027, 2, 1, 0, 0, 0, TimeSpan.Zero), locateCli: _ => null);
+        Assert.Equal("price_snapshot_unavailable", Assert.Throws<ReviewError>(() => app.PrepareQuickTest(new(["openai-gpt-6-luna"], "code", "Review", DesktopService.SampleCode, null, true))).Code);
+        Assert.Equal(1, app.PrepareQuickTest(new(["claude-cli"], "code", "Review", DesktopService.SampleCode, null, true)).Requests);
+        Assert.Equal(1, app.PrepareQuickTest(new(["google-gemini-3.5-flash"], "code", "Review", DesktopService.SampleCode, null, true)).Requests);
+    }
     [Fact] public void CustomModelCanBeAddedPlannedAndRemoved()
     {
         using var e = new TestEnvironment();var app = Service(e, new());

@@ -105,12 +105,21 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         File.Delete(model.File);
         if (File.Exists(CustomPricesFile)) Replace(CustomPricesFile, Data.Json(Data.Read<List<PriceRow>>(CustomPricesFile).Where(r => r.CanonicalModelKey != model.CanonicalModelKey).ToList()));
     }
+    // Shipped snapshots are live-<date>.json (paid) and live-<date>-google-free.json (Google rows at the free tier).
+    // The one whose window covers now is used; before the first or after the last, the nearest one is used, so
+    // all-zero-price plans keep working and paid plans stop with price_snapshot_expired until prices are refreshed.
+    public static PriceSnapshot ShippedPrices(string folder, bool googleFree, DateTimeOffset now)
+    {
+        var all = Directory.GetFiles(folder, "live-*.json").Where(f => f.EndsWith("-google-free.json", StringComparison.Ordinal) == googleFree)
+            .Select(Data.Read<PriceSnapshot>).OrderBy(s => s.EffectiveFrom).ToList();
+        Data.Require(all.Count > 0, "price_snapshot_unavailable", 12);
+        return all.LastOrDefault(s => PriceRules.InWindow(s, now)) ?? all.LastOrDefault(s => s.EffectiveFrom <= now) ?? all[0];
+    }
     // The shipped snapshot (paid, or with Google rows at the free tier) plus user rows, written content-addressed so a
     // plan's pinned price file never changes underneath it.
     public (PriceSnapshot Snapshot, string Path) MergedPrices()
     {
-        string baseFile = Path.Combine(profilesRoot, "prices", LoadSettings().GoogleFreeTier ? "live-2026-11-04-google-free.json" : "live-2026-11-04.json");
-        var snapshot = Data.Read<PriceSnapshot>(baseFile);
+        var snapshot = ShippedPrices(Path.Combine(profilesRoot, "prices"), LoadSettings().GoogleFreeTier, (clock ?? (() => DateTimeOffset.UtcNow))());
         var custom = File.Exists(CustomPricesFile) ? Data.Read<List<PriceRow>>(CustomPricesFile) : [];
         if (custom.Count > 0)
             snapshot = snapshot with

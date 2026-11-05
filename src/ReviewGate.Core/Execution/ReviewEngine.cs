@@ -119,7 +119,7 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         {
             var reviewer=p.Reviewers.Single(r=>r.Id==p.Requests.Single(q=>q.Id==a.RequestId).ReviewerId);
             var price=p.Prices.Prices.Single(x=>x.CanonicalModelKey==reviewer.CanonicalModelKey);
-            if(price is {InputPerMillion:0,CachedInputPerMillion:0,OutputPerMillion:0}&&(price.OutputIncludesReasoning||price.ReasoningPerMillion==0))store.SettleZeroPrice(a.Id);
+            if(PriceRules.IsZero(price))store.SettleZeroPrice(a.Id);
         }
     }
     async Task<AttemptRow> DispatchAsync(Plan p,RunRow run,RequestPlan request,Grant grant,CancellationToken cancellation)
@@ -138,7 +138,7 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         var a=store.Reserve(run,p,request,grant);
         Checkpoint("reserved");CheckCancel(run,cancellation);
         StateStore.CheckGrant(grant,p,run,store.Now);store.EnsureGrantActive(grant.Id);Planner.CheckPins(p);
-        Data.Require(store.Now>=p.Prices.EffectiveFrom&&store.Now<p.Prices.EffectiveTo,"price_snapshot_expired",12);
+        Data.Require(PriceRules.Usable(p,store.Now),"price_snapshot_expired",12);
         store.Dispatch(a.Id);Checkpoint("dispatch_intent");
         try
         {
