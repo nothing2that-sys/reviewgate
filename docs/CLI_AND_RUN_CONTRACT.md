@@ -33,7 +33,7 @@
 
 | 옵션 | 규칙·기본값 |
 |---|---|
-| `--state-root <dir>` | 기본 `%LOCALAPPDATA%\ReviewGate`. 테스트는 명시 임시 root. 이 root의 synthetic namespace에 하나의 장부를 사용 |
+| `--state-root <dir>` | 기본 `%USERPROFILE%\.reviewgate`(2026-11-05까지는 `%LOCALAPPDATA%\ReviewGate`; Claude 데스크톱 앱 같은 MSIX 호스트가 AppData를 패키지별로 가상화해 장부가 갈라지므로 옮김). 테스트는 명시 임시 root. 이 root의 synthetic namespace에 하나의 장부를 사용 |
 | `--project <id>` | 새 plan/직접 exec에 필수. 1~64자의 영문·숫자·`_`·`-` ID. 같은 namespace의 같은 ID가 worker·프로젝트 예산 identity |
 | `--config <file>` | 선택 project 설정 파일. 아래 지시·Profile·reviewer·한도 등의 기본값을 담을 수 있음. 명시 CLI가 우선하며 최종 병합값을 plan에 저장. 키/실행 스크립트 금지 |
 | `--source-root <dir>` | 새 plan에 필수. input의 경로 기준. repo root와 같다고 추정하지 않음 |
@@ -144,7 +144,7 @@ simulation_grant는 하나의 plan과 하나의 run에 묶습니다. 첫 실행 
 
 ## 6. 저장·동시성
 
-기본 root 후보는 `%LOCALAPPDATA%\ReviewGate`입니다. synthetic와 미래 live를 별도 namespace로 분리하고 초기 테스트에는 임시 root만 사용합니다. 원문 트리 안이나 동기화·네트워크 폴더는 상태 root로 허용하지 않는 방향입니다.
+기본 root는 `%USERPROFILE%\.reviewgate`입니다(AppData 가상화를 피함). synthetic와 미래 live를 별도 namespace로 분리하고 초기 테스트에는 임시 root만 사용합니다. 원문 트리 안이나 동기화·네트워크 폴더는 상태 root로 허용하지 않는 방향입니다.
 
 namespace별 단일 `state.db` SQLite 파일에 projects, plans, runs, requests/attempts, budget entries, artifact metadata, policy/grant metadata를 저장합니다. 프로젝트별 DB와 공통 장부 DB를 나누지 않습니다. WAL, foreign_keys=ON, busy_timeout=5000ms를 초기 기준으로 두고 SQLITE_BUSY는 exit 13입니다. 긴 원문·보고서는 immutable 파일로 분리합니다. 이것은 논리 데이터 목록이며 DB DDL이 아닙니다.
 

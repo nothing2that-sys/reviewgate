@@ -19,7 +19,7 @@ public record ReviewerChoice(string Label, string Provider, ModelOption? Primary
 public partial class MainWindow : Window
 {
     readonly DesktopService service = new(
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReviewGate"),
+        StatePaths.DefaultRoot,
         Path.Combine(AppContext.BaseDirectory, "profiles"), new KeyRing(new WindowsCredentialVault()));
     readonly Dictionary<string, (ComboBox Primary, ComboBox Fallback)> modelBoxes = [];
     List<ModelOption> models = [];

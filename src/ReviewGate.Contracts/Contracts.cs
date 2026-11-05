@@ -99,6 +99,14 @@ public static class PriceRules
 // snapshots the user approved after a price refresh are user-<stamp>[-google-free].json in the approved folder.
 // Among those whose window covers now, the most recently retrieved wins. With none in its window, the nearest one is
 // used, so all-zero-price plans keep working and paid plans stop with price_snapshot_expired until prices are refreshed.
+// The default state root is %USERPROFILE%\.reviewgate, not under AppData: packaged hosts (the Claude desktop app is
+// an MSIX package) redirect AppData\Local writes of the processes they start to a per-package copy, so an agent
+// session and the user's own console would otherwise read and write different ledgers.
+public static class StatePaths
+{
+    public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".reviewgate");
+}
+
 public static class PriceSnapshots
 {
     public static (PriceSnapshot Snapshot, string File) Select(string folder, bool googleFree, DateTimeOffset now, string? approvedFolder = null)

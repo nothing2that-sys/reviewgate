@@ -75,7 +75,7 @@ public static class CliHost
         string? safeOutput=null;
         try
         {
-            var o=Parse(args);string state=Path.GetFullPath(o.One("state-root")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ReviewGate"));
+            var o=Parse(args);string state=Path.GetFullPath(o.One("state-root")??StatePaths.DefaultRoot);
             Data.Require(!state.StartsWith(@"\\",StringComparison.Ordinal),"network_state_root_unsupported");SafePath.NoLinks(state);
             if(command=="credential")return Credential(o) with{OutputPath=o.One("output")};
             if(command is "review" or "policy")
