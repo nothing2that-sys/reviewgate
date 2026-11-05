@@ -19,7 +19,12 @@ public record PriceProposalRow(PriceTarget Target, PriceRow? Current, string Sta
     public bool Agreed => Status == "agreed";
     public bool FreeTierAvailable => Target.Provider == "google" && FreeTier != "no";
 }
-public record PriceProposal(DateTimeOffset LookedUpAt, List<PriceLookup> Lookups, List<PriceProposalRow> Rows);
+public record PriceProposal(DateTimeOffset LookedUpAt, List<PriceLookup> Lookups, List<PriceProposalRow> Rows, string? RecordId = null);
+// Every lookup is kept, approved or not: what each CLI answered (normalized body, or why it failed), how long it took,
+// the comparison, and the user's decision. No key or credential is involved, so the record holds nothing secret.
+public record PriceRawAnswer(string Outcome, string? ErrorCode, string? Body, double Seconds);
+public record PriceLookupRecord(string Id, DateTimeOffset LookedUpAt, Dictionary<string, PriceRawAnswer> Answers, PriceProposal Proposal,
+    string Decision = "pending", DateTimeOffset? DecidedAt = null, string? Snapshot = null, List<string>? FreeTierModels = null);
 
 public static class PriceRefresh
 {

@@ -61,7 +61,7 @@ public partial class MainWindow : Window
         finally { IsEnabled = true; }
         Status("가격 조회를 마쳤습니다. 비교 화면에서 확인하세요.");
         var review = new PriceReviewWindow(proposal, service.CurrentFreeTierModels()) { Owner = this };
-        if (review.ShowDialog() != true) { Status("가격표를 바꾸지 않았습니다."); return; }
+        if (review.ShowDialog() != true) { service.CancelPrices(proposal);Status($"가격표를 바꾸지 않았습니다. 조회 기록: {proposal.RecordId}"); return; }
         var status = service.ApprovePrices(proposal, review.FreeTierModels);
         RefreshPriceStatus();RefreshModels();Status("새 가격표를 적용했습니다: " + status.Text);
     });

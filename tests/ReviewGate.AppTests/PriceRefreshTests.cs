@@ -69,7 +69,12 @@ public sealed class PriceRefreshTests
         Assert.False(proposal.Rows.Single(r => r.Target.ModelId == "gemini-4-argon").FreeTierAvailable);
 
         // The user keeps 3.5-flash and 3.8-flash on the free tier; argon cannot be free even if asked.
+        // The lookup is on record before the user decides, with what each CLI answered.
+        var pending = Assert.Single(app.PriceLookupHistory());
+        Assert.Equal((proposal.RecordId, "pending"), (pending.Id, pending.Decision));
+        Assert.All(PriceRefresh.Clis, cli => Assert.Contains("structured_output", pending.Answers[cli].Body));
         var status = app.ApprovePrices(proposal, new HashSet<string> { "google/gemini-3.5-flash", "google/gemini-3.8-flash", "google/gemini-4-argon" });
+        var approved = Assert.Single(app.PriceLookupHistory());Assert.Equal("approved", approved.Decision);Assert.Equal(status.SnapshotId.Replace("-google-free", ""), approved.Snapshot);
         Assert.True(status.UserApproved);Assert.False(status.Expired);
         Assert.Equal(Clock.AddDays(30), status.EffectiveTo); // 30 days come before the announced 2027-01-01 change
         var models = app.Models();ModelOption M(string id) => models.Single(m => m.Id == id);
@@ -99,6 +104,20 @@ public sealed class PriceRefreshTests
         Assert.Equal("cli_not_found", proposal.Lookups.Single(l => l.Cli == "codex-cli").Error);Assert.All(proposal.Rows, r => Assert.Equal("missing", r.Status));
         Assert.Equal("no_agreed_prices", Assert.Throws<ReviewError>(() => app.ApprovePrices(proposal, new HashSet<string>())).Code);
         Assert.False(Directory.Exists(Path.Combine(e.State, "desktop", "prices", "approved")));
+        // The failure is kept so its cause can be read later.
+        var record = Assert.Single(app.PriceLookupHistory());
+        Assert.Equal(("error", "cli_not_found"), (record.Answers["codex-cli"].Outcome, record.Answers["codex-cli"].ErrorCode));Assert.NotNull(record.Answers["claude-cli"].Body);
+    }
+    [Fact] public async Task CancelledAndUnreadableLookupsAreRecordedToo()
+    {
+        using var e = new TestEnvironment();
+        var app = Service(e, (cli, _) => cli == "codex-cli" ? new("received", 200, "{\"status\":\"completed\",\"structured_output\":{\"models\":\"not a list\"}}", null) : Answer(Page()));
+        var proposal = await app.LookupPricesAsync();
+        Assert.Equal("invalid_payload", proposal.Lookups.Single(l => l.Cli == "codex-cli").Error);
+        app.CancelPrices(proposal);
+        var record = Assert.Single(app.PriceLookupHistory());
+        Assert.Equal("cancelled", record.Decision);Assert.NotNull(record.DecidedAt);Assert.Contains("not a list", record.Answers["codex-cli"].Body);
+        Assert.Equal("live-2026-11-04-google-free", app.PriceStatus().SnapshotId);
     }
     [Theory]
     [InlineData(0.75, "Input $0.75 / Output", true)][InlineData(0.075, "caching $0.075", true)][InlineData(2, "$2.00 per 1M", true)]

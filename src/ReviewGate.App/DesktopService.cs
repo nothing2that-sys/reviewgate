@@ -148,20 +148,44 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
             .Select(r => new PriceTarget(r.HostingProvider, r.ModelId, r.CanonicalModelKey, pages[r.HostingProvider]))
             .OrderBy(t => ProviderCatalog.Ids.ToList().IndexOf(t.Provider)).ThenBy(t => t.ModelId, StringComparer.Ordinal).ToList();
     }
+    string PriceLookups => Path.Combine(DesktopDir, "prices", "lookups");
     // Claude Code and Codex read the pages independently and in parallel; the comparison is against the paid snapshot in use.
+    // The whole lookup is saved to desktop\prices\lookups\<id>.json before it is shown, whatever the user decides.
     public async Task<PriceProposal> LookupPricesAsync(CancellationToken cancellation = default)
     {
         var targets = PriceTargets();var now = Now;
         var job = new ReviewGate.Transport.Cli.CliJob(PriceRefresh.System, PriceRefresh.Prompt(targets, now), PriceRefresh.Schema(), Web: true);
         var run = cliJob ?? ((provider, j, ct) => new ReviewGate.Transport.Cli.CliTransport(locateCli).RunJobAsync(provider, j, 900, ct));
+        var raw = new System.Collections.Concurrent.ConcurrentDictionary<string, PriceRawAnswer>();
         async Task<PriceLookup> One(string provider)
         {
-            try { return PriceRefresh.Read(provider, await run(provider, job, cancellation)); }
-            catch (ReviewError e) { return new(provider, "failed", e.Code, []); }
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var result = await run(provider, job, cancellation);
+                raw[provider] = new(result.Outcome, result.ErrorCode, result.Body, watch.Elapsed.TotalSeconds);
+                return PriceRefresh.Read(provider, result);
+            }
+            catch (ReviewError e) { raw[provider] = new("error", e.Code, null, watch.Elapsed.TotalSeconds);return new(provider, "failed", e.Code, []); }
+            catch (Exception e) when (e is System.Text.Json.JsonException or InvalidOperationException or FormatException)
+            { raw.TryAdd(provider, new("unreadable", "invalid_payload", null, watch.Elapsed.TotalSeconds));return new(provider, "failed", "invalid_payload", []); }
         }
         var lookups = await Task.WhenAll(PriceRefresh.Clis.Select(One));
-        return PriceRefresh.Compare(targets, lookups, ShippedPrices(Path.Combine(profilesRoot, "prices"), false, now, ApprovedPrices), now);
+        string id = "lookup-" + now.ToOffset(TimeSpan.FromHours(9)).ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..6];
+        var proposal = PriceRefresh.Compare(targets, lookups, ShippedPrices(Path.Combine(profilesRoot, "prices"), false, now, ApprovedPrices), now) with { RecordId = id };
+        Data.CreateFile(Path.Combine(PriceLookups, id + ".json"), Data.Json(new PriceLookupRecord(id, now, new(raw), proposal)));
+        return proposal;
     }
+    public List<PriceLookupRecord> PriceLookupHistory() => Directory.Exists(PriceLookups)
+        ? Directory.GetFiles(PriceLookups, "lookup-*.json").Select(Data.Read<PriceLookupRecord>).OrderByDescending(r => r.LookedUpAt).ToList() : [];
+    void Decide(PriceProposal proposal, string decision, string? snapshot = null, IEnumerable<string>? free = null)
+    {
+        if (proposal.RecordId is not string id) return;
+        string file = Path.Combine(PriceLookups, id + ".json");
+        if (!File.Exists(file)) return;
+        Replace(file, Data.Json(Data.Read<PriceLookupRecord>(file) with { Decision = decision, DecidedAt = Now, Snapshot = snapshot, FreeTierModels = free?.Order().ToList() }));
+    }
+    public void CancelPrices(PriceProposal proposal) => Decide(proposal, "cancelled");
     // Writes the approved pair and its excerpt; from now on they are the snapshots in use until they expire.
     public PriceStatus ApprovePrices(PriceProposal proposal, IReadOnlySet<string> freeTierModels)
     {
@@ -170,6 +194,7 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         Data.CreateFile(Path.Combine(ApprovedPrices, paid.Id + ".md"), excerpt);
         Data.CreateFile(Path.Combine(ApprovedPrices, paid.Id + ".json"), Data.Json(paid));
         Data.CreateFile(Path.Combine(ApprovedPrices, free.Id + ".json"), Data.Json(free));
+        Decide(proposal, "approved", paid.Id, freeTierModels);
         return PriceStatus();
     }
     // The shipped snapshot (paid, or with Google rows at the free tier) plus user rows, written content-addressed so a
