@@ -130,6 +130,47 @@ public sealed class CliReviewerTests
         var review = await CommandLine("codex-cli", null);Assert.DoesNotContain("--search", review.ArgumentList);
     }
 
+    // Implementation workers may edit files in their folder but get no command, shell or browser tools.
+    [Fact] public async Task EditJobsGetFileToolsButNoCommands()
+    {
+        using var e = new TestEnvironment();
+        var seen = new List<System.Diagnostics.ProcessStartInfo>();string? task = null;
+        var transport = new CliTransport(exe => @"C:\fake\" + exe, psi =>
+        {
+            seen.Add(psi);
+            if (psi.ArgumentList.IndexOf("--add-dir") is int i and >= 0 && File.Exists(Path.Combine(psi.ArgumentList[i + 1], "task.md"))) task = File.ReadAllText(Path.Combine(psi.ArgumentList[i + 1], "task.md"));
+            return null;
+        });
+        var job = new CliJob("SYSTEM", "PROMPT", "{\"type\":\"object\"}", Workdir: e.Source, Edit: true);
+        foreach (var cli in new[] { "claude-cli", "codex-cli", "agy-cli" })
+            Assert.Equal("cli_start_failed", (await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync(cli, job, 60, CancellationToken.None))).Code);
+        var (claude, codex, agy) = (seen[0], seen[1], seen[2]);
+        Assert.Equal(e.Source, claude.WorkingDirectory);Assert.Equal(CliTransport.EditTools, claude.ArgumentList[claude.ArgumentList.IndexOf("--tools") + 1]);
+        Assert.DoesNotContain("Bash", claude.ArgumentList[claude.ArgumentList.IndexOf("--tools") + 1]);
+        Assert.Equal("acceptEdits", claude.ArgumentList[claude.ArgumentList.IndexOf("--permission-mode") + 1]);Assert.DoesNotContain("--dangerously-skip-permissions", claude.ArgumentList);
+        // Codex: every command/browser feature off (top-level -c before "exec"), workspace-write for its patches.
+        int exec = codex.ArgumentList.IndexOf("exec");
+        foreach (var f in CliTransport.CodexNoCommandFeatures) Assert.True(codex.ArgumentList.IndexOf($"features.{f}=false") is int at && at > 0 && at < exec && codex.ArgumentList[at - 1] == "-c", f);
+        Assert.Equal("workspace-write", codex.ArgumentList[codex.ArgumentList.IndexOf("--sandbox") + 1]);Assert.DoesNotContain("--dangerously-bypass-approvals-and-sandbox", codex.ArgumentList);
+        Assert.Equal(e.Source, codex.ArgumentList[codex.ArgumentList.IndexOf("-C") + 1]);
+        Assert.Equal("accept-edits", agy.ArgumentList[agy.ArgumentList.IndexOf("--mode") + 1]);Assert.DoesNotContain("--dangerously-skip-permissions", agy.ArgumentList);
+        Assert.Contains("Do not run any command", agy.ArgumentList[0]);Assert.Equal("SYSTEM\n\nPROMPT", task);
+        // An edit job needs a folder, and never gets the web.
+        Assert.Equal("workdir_required", (await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync("claude-cli", job with { Workdir = null }, 60, CancellationToken.None))).Code);
+        Assert.Equal("unsupported_capability", (await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync("claude-cli", job with { Web = true }, 60, CancellationToken.None))).Code);
+        // Reviews keep read-only tools and no permission mode.
+        var review = await CommandLine("claude-cli", e.Source);Assert.DoesNotContain("--permission-mode", review.ArgumentList);
+        var codexReview = await CommandLine("codex-cli", e.Source);Assert.DoesNotContain("--sandbox", codexReview.ArgumentList);
+    }
+    [Fact] public void DeniedActionsAreReported()
+    {
+        var agy = CliTransport.FromAgy("{\"status\":\"SUCCESS\",\"response\":\"\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"denied_actions\":[{\"action\":\"command\",\"display_name\":\"RunCommand\"}]}")!;
+        Assert.Equal("command", agy["denied_actions"]![0]!["action"]!.GetValue<string>());Assert.Null(agy["structured_output"]);
+        var claude = CliTransport.FromClaude("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"permission_denials\":[{\"tool_name\":\"Bash\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}")!;
+        Assert.Equal("Bash", claude["denied_actions"]![0]!["tool_name"]!.GetValue<string>());
+        Assert.Null(CliTransport.FromClaude("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"permission_denials\":[]}")!["denied_actions"]);
+    }
+
     sealed class FakeCli(Func<ReviewerProfile, TransportResult> answer) : IModelTransport
     {
         public List<string> Sent { get; } = [];

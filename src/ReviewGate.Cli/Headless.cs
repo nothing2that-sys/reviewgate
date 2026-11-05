@@ -59,6 +59,26 @@ static class Headless
         });
     }
 
+    // implement: a CLI worker changes the repository on its own branch in a separate worktree (no commands), then
+    // ReviewGate runs the allowed checks and has the named reviewers review the change. Nothing is merged.
+    public static Implementer Implementer(string state) => new(Service(state), state, CliHost.WorkerFactory());
+    public static async Task<CommandResult> ImplementAsync(CliHost.Options o, string state, CancellationToken ct)
+    {
+        string instruction = await CliHost.InstructionAsync(o, ct);
+        var workers = o.Many("worker");Data.Require(workers.Count == 1, "worker_required");
+        int? minutes = o.One("max-minutes") is string m ? int.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture, out var v) && v >= 1 ? v : throw new ReviewError(2, "invalid_max_minutes") : null;
+        var request = new ImplementRequest(instruction, o.Need("repo"), ReviewerPick.Parse(workers[0]), o.Many("reviewer").Select(ReviewerPick.Parse).ToList(), o.One("base"), o.One("branch"),
+            o.Many("check"), minutes, !o.Has("no-fallback"), o.Has("no-review"));
+        var outcome = await Implementer(state).RunAsync(request, ct);
+        return new(outcome.ExitCode, new Envelope
+        {
+            Command = "implement", ExecutionMode = "live", Limitations = Envelope.LiveLimitations, Status = outcome.Status, ErrorCode = outcome.ErrorCode,
+            RequiredAction = outcome.RequiredAction, RunId = outcome.Details["review"]?["run_id"]?.GetValue<string>(), Details = outcome.Details
+        });
+    }
+    public static async Task<CommandResult> DiscardAsync(CliHost.Options o, string state, CancellationToken ct) =>
+        new(0, new Envelope { Command = "discard", ExecutionMode = "live", Limitations = [], Status = "discarded", Details = await Implementer(state).DiscardAsync(o.Need("repo"), o.Need("branch"), ct) });
+
     public static CommandResult Policy(CliHost.Options o, string state)
     {
         var svc = Service(state);
@@ -69,19 +89,47 @@ static class Headless
             ["reviewers"] = new JsonArray([.. p.Reviewers.Select(r => (JsonNode)new JsonObject { ["id"] = r.Id, ["model"] = r.CanonicalModelKey })]),
             ["max_run_usd"] = p.MaxRunUsd, ["max_requests_per_run"] = p.MaxRequestsPerRun, ["input_classes"] = new JsonArray([.. p.InputClasses.Select(c => (JsonNode)c)])
         };
-        Envelope Out(string status, StandingPolicy? p) => new() { Command = "policy", ExecutionMode = "live", Limitations = [], Status = status, Details = Show(p) };
+        static JsonObject ShowImplement(ImplementPolicy? p) => p is null ? new JsonObject { ["active"] = false } : new JsonObject
+        {
+            ["active"] = true, ["id"] = p.Id, ["issued_at"] = p.IssuedAt.ToString("O"), ["expires_at"] = p.ExpiresAt.ToString("O"),
+            ["repositories"] = new JsonArray([.. p.Repositories.Select(r => (JsonNode)r)]),
+            ["workers"] = new JsonArray([.. p.Workers.Select(r => (JsonNode)new JsonObject { ["id"] = r.Id, ["model"] = r.CanonicalModelKey })]),
+            ["checks"] = new JsonArray([.. p.Checks.Select(c => (JsonNode)c)]), ["max_minutes"] = p.MaxMinutes
+        };
+        Envelope Out(string status, StandingPolicy? p, ImplementPolicy? i) => new()
+        {
+            Command = "policy", ExecutionMode = "live", Limitations = [], Status = status, Details = new JsonObject { ["review"] = Show(p), ["implement"] = ShowImplement(i) }
+        };
         switch (o.Instruction)
         {
-            case "status": return new(0, Out("ok", svc.ActivePolicy()));
-            case "revoke": return new(0, Out(svc.RevokePolicy() ? "revoked" : "none_active", null));
+            case "status": return new(0, Out("ok", svc.ActivePolicy(), svc.ActiveImplementPolicy()));
+            // Revoking needs no person and ends both policies.
+            case "revoke": return new(0, Out(svc.RevokePolicy() | svc.RevokeImplementPolicy() ? "revoked" : "none_active", null, null));
         }
-        // set: only a person at an interactive console can issue or widen the policy.
+        // set / set-implement: only a person at an interactive console can issue or widen a policy.
         Data.Require(!Console.IsInputRedirected, "interactive_console_required");
+        var e = Console.Error;int days = o.One("expires-days") is string d ? int.TryParse(d, NumberStyles.None, CultureInfo.InvariantCulture, out var k) ? k : throw new ReviewError(2, "invalid_policy") : 90;
+        if (o.Instruction == "set-implement")
+        {
+            int minutes = o.One("max-minutes") is string mm ? int.TryParse(mm, NumberStyles.None, CultureInfo.InvariantCulture, out var x) ? x : throw new ReviewError(2, "invalid_policy") : 30;
+            var ip = svc.DraftImplementPolicy(o.Many("allow-repo"), o.Many("worker").Select(ReviewerPick.Parse).ToList(), o.Many("check"), minutes, days);
+            e.WriteLine("ReviewGate implementation policy — agents may have a CLI worker change these repositories without asking each time.");
+            e.WriteLine("Each run works on a new branch reviewgate/impl-* in a separate worktree; the worker can edit files but not run commands; nothing is merged.");
+            foreach (var repo in ip.Repositories) e.WriteLine($"  repository  {repo}");
+            foreach (var w in ip.Workers) e.WriteLine($"  worker      {w.Id}  ({w.CanonicalModelKey}) — signed-in CLI account, repository content is sent to it");
+            foreach (var c in ip.Checks) e.WriteLine($"  check       {c}   (run by ReviewGate in the worktree; it executes the changed code)");
+            if (ip.Checks.Count == 0) e.WriteLine("  check       none");
+            e.WriteLine($"  time        at most {ip.MaxMinutes} minutes per worker run (and per check)");
+            e.WriteLine($"  expires     {ip.ExpiresAt.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} KST ({days} days). Replaces any active implementation policy.");
+            e.WriteLine("  The cross-review after each change still needs the review policy (policy set).");
+            e.Write($"Type the last 6 characters of the policy ID ({ip.Id[^6..]}) to approve, anything else to cancel: ");
+            Data.Require(Console.ReadLine()?.Trim() == ip.Id[^6..], "policy_not_confirmed", 10);
+            svc.IssueImplementPolicy(ip, "interactive_console");
+            return new(0, Out("issued", svc.ActivePolicy(), ip));
+        }
         decimal maxUsd = o.One("max-usd") is string m ? decimal.TryParse(m, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var v) && v >= 0 ? v : throw new ReviewError(2, "invalid_policy") : 1m;
         int maxRequests = o.One("max-requests") is string r ? int.TryParse(r, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : throw new ReviewError(2, "invalid_policy") : 40;
-        int days = o.One("expires-days") is string d ? int.TryParse(d, NumberStyles.None, CultureInfo.InvariantCulture, out var k) ? k : throw new ReviewError(2, "invalid_policy") : 90;
         var policy = svc.DraftPolicy(o.Many("allow-root"), o.Many("reviewer").Select(ReviewerPick.Parse).ToList(), maxUsd, maxRequests, days);
-        var e = Console.Error;
         e.WriteLine("ReviewGate standing policy — agents may run live reviews inside these limits without asking each time.");
         e.WriteLine("Source text inside the folders below is sent to the listed reviewers (API providers, or the CLIs' signed-in accounts).");
         foreach (var root in policy.SourceRoots) e.WriteLine($"  folder      {root}");
@@ -92,6 +140,6 @@ static class Headless
         e.Write($"Type the last 6 characters of the policy ID ({policy.Id[^6..]}) to approve, anything else to cancel: ");
         Data.Require(Console.ReadLine()?.Trim() == policy.Id[^6..], "policy_not_confirmed", 10);
         svc.IssuePolicy(policy, "interactive_console");
-        return new(0, Out("issued", policy));
+        return new(0, Out("issued", policy, svc.ActiveImplementPolicy()));
     }
 }

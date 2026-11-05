@@ -11,9 +11,9 @@ using ReviewGate.Transport.Http;
 namespace ReviewGate.Cli;
 public static class CliHost
 {
-    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer","allow-root","expires-days"];
-    static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin","no-fallback"];
-    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer","allow-root"];
+    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer","allow-root","expires-days","repo","base","branch","worker","check","max-minutes","allow-repo"];
+    static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin","no-fallback","no-review"];
+    static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer","allow-root","check","allow-repo","worker"];
     public sealed class Options
     {
         public string Command {get;init;}="";
@@ -27,7 +27,7 @@ public static class CliHost
     public static Options Parse(string[] args)
     {
         Data.Require(args.Length>0,"command_required");var o=new Options{Command=args[0]};
-        Data.Require(o.Command is "plan" or "exec" or "status" or "cancel" or "resume" or "export" or "credential" or "grant" or "review" or "policy","unknown_command");
+        Data.Require(o.Command is "plan" or "exec" or "status" or "cancel" or "resume" or "export" or "credential" or "grant" or "review" or "policy" or "implement" or "discard","unknown_command");
         for(int i=1;i<args.Length;i++)
         {
             string key=args[i];if(!key.StartsWith("--",StringComparison.Ordinal)){Data.Require(o.Instruction is null,"duplicate_instruction");o.Instruction=key;continue;}
@@ -37,8 +37,15 @@ public static class CliHost
         }
         // Headless commands take only their own options (no config file, plan, grant, fixture or price overrides).
         if(o.Command=="review")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "source-root" or "input" or "reference" or "repository-root" or "reviewer" or "no-fallback" or "profile" or "project" or "prompt-file" or "prompt-stdin" or "output")),"invalid_review_options");
-        if(o.Command=="policy")Data.Require(o.Instruction is "set" or "status" or "revoke"&&!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-root" or "reviewer" or "max-usd" or "max-requests" or "expires-days" or "output"))
-            &&(o.Instruction=="set"||!o.Items.Keys.Any(k=>k is not ("state-root" or "output"))),"invalid_policy_command");
+        if(o.Command=="policy")Data.Require(o.Instruction switch
+            {
+                "set"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-root" or "reviewer" or "max-usd" or "max-requests" or "expires-days" or "output")),
+                "set-implement"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-repo" or "worker" or "check" or "max-minutes" or "expires-days" or "output")),
+                "status" or "revoke"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "output")),
+                _=>false
+            },"invalid_policy_command");
+        if(o.Command=="implement")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "repo" or "base" or "branch" or "worker" or "reviewer" or "check" or "max-minutes" or "no-review" or "no-fallback" or "prompt-file" or "prompt-stdin" or "output")),"invalid_implement_options");
+        if(o.Command=="discard")Data.Require(o.Instruction is null&&!o.Items.Keys.Any(k=>k is not ("state-root" or "repo" or "branch" or "output")),"invalid_discard_options");
         if(o.Has("config"))
         {
             Data.Require(!o.Has("plan"),"plan_override_forbidden");string path=Path.GetFullPath(o.Need("config"));
@@ -78,10 +85,21 @@ public static class CliHost
             var o=Parse(args);string state=Path.GetFullPath(o.One("state-root")??StatePaths.DefaultRoot);
             Data.Require(!state.StartsWith(@"\\",StringComparison.Ordinal),"network_state_root_unsupported");SafePath.NoLinks(state);
             if(command=="credential")return Credential(o) with{OutputPath=o.One("output")};
-            if(command is "review" or "policy")
+            if(command is "review" or "policy" or "implement" or "discard")
             {
-                if(o.One("output")is string output){Data.Require(!SafePath.Within(output,state)&&(o.One("source-root") is not string src||!SafePath.Within(output,src)),"output_protected_overlap");safeOutput=output;}
-                return (command=="review"?await Headless.ReviewAsync(o,state,ct):Headless.Policy(o,state)) with{OutputPath=o.One("output")};
+                if(o.One("output")is string output)
+                {
+                    Data.Require(!SafePath.Within(output,state)&&!SafePath.Within(output,ReviewGate.App.Implementer.WorktreeRoot(state))&&new[]{o.One("source-root"),o.One("repo")}.OfType<string>().All(src=>!SafePath.Within(output,src)),"output_protected_overlap");
+                    safeOutput=output;
+                }
+                var result=command switch
+                {
+                    "review"=>await Headless.ReviewAsync(o,state,ct),
+                    "implement"=>await Headless.ImplementAsync(o,state,ct),
+                    "discard"=>await Headless.DiscardAsync(o,state,ct),
+                    _=>Headless.Policy(o,state)
+                };
+                return result with{OutputPath=o.One("output")};
             }
             // The namespace comes from the plan/run ID, so a live run is never opened in the synthetic ledger or vice versa.
             string ns=command is "status" or "cancel" or "resume" or "export"?StateStore.NamespaceOf(o.Need("run")):o.Has("plan")?StateStore.NamespaceOf(o.Need("plan")):o.One("execution-mode")??"synthetic";
@@ -127,6 +145,8 @@ public static class CliHost
     public static Func<ICredentialStore> CredentialFactory {get;set;}=()=>OperatingSystem.IsWindows()?new KeyRing(new WindowsCredentialVault()):throw new ReviewError(14,"credential_store_unsupported");
     public static Func<HttpMessageHandler?> HandlerFactory {get;set;}=()=>null;
     public static Func<IModelTransport> CliFactory {get;set;}=()=>new ReviewGate.Transport.Cli.CliTransport();
+    // Implementation workers (edit jobs); null means the real CLIs.
+    public static Func<ReviewGate.App.WorkerRunner?> WorkerFactory {get;set;}=()=>null;
     // Reviewer, review and price profiles ship next to the executable.
     public static string ProfilesRoot {get;set;}=Path.Combine(AppContext.BaseDirectory,"profiles");
     public static async Task<string> InstructionAsync(Options o,CancellationToken ct)

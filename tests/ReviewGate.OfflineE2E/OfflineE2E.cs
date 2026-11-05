@@ -67,7 +67,7 @@ public sealed class OfflineE2E
     }
     [Fact] public void ProductSourcesContainNoNetworkOrCredentialImplementation()
     {
-        // Network and credential-store code may exist only in Transport.Http; starting processes (the agent CLIs) and
+        // Network and credential-store code may exist only in Transport.Http; starting processes (the agent CLIs, git, checks) and
         // reading PATH only in Transport.Cli. Nothing reads API keys from the environment, and the only URLs are the
         // three fixed provider endpoints in the provider catalog.
         string src=Path.Combine(TestEnvironment.Repository,"src");

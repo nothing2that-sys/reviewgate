@@ -38,6 +38,7 @@ public sealed class StateStore : IDisposable
           CREATE TABLE IF NOT EXISTS bundles(run_id TEXT PRIMARY KEY REFERENCES runs(id),json TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS grant_issuance(grant_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL REFERENCES plans(id),hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS standing_policy(id TEXT PRIMARY KEY,json TEXT NOT NULL,hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL,revoked_at TEXT);
+          CREATE TABLE IF NOT EXISTS implement_policy(id TEXT PRIMARY KEY,json TEXT NOT NULL,hash TEXT NOT NULL,channel TEXT NOT NULL,issued_at TEXT NOT NULL,revoked_at TEXT);
           """);
         Data.Require(Scalar("PRAGMA foreign_keys;")=="1","state_store_corrupt",13);
     }
@@ -183,6 +184,25 @@ public sealed class StateStore : IDisposable
         return p;
     }
     public bool RevokePolicies()=>Exec("UPDATE standing_policy SET revoked_at=$t WHERE revoked_at IS NULL",null,("$t",Now.ToString("O")))>0;
+    // The implementation policy follows the same rules: one active, issued only by a person, revocable by anyone.
+    public void RecordImplementPolicy(ImplementPolicy policy,string channel)
+    {
+        Data.Require(Namespace=="live","policy_is_live_only");ValidId(policy.Id);
+        Data.Require(channel is "interactive_console" or "desktop_confirm","invalid_policy_channel");
+        using var tx=db.BeginTransaction();
+        Exec("UPDATE implement_policy SET revoked_at=$t WHERE revoked_at IS NULL",tx,("$t",Now.ToString("O")));
+        Exec("INSERT INTO implement_policy VALUES($i,$j,$h,$c,$t,NULL)",tx,("$i",policy.Id),("$j",Data.Json(policy)),("$h",Data.Hash(Data.Json(policy))),("$c",channel),("$t",Now.ToString("O")));
+        tx.Commit();
+    }
+    public ImplementPolicy? ActiveImplementPolicy()
+    {
+        string? json=Scalar("SELECT json FROM implement_policy WHERE revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1");
+        if(json is null)return null;
+        var p=Data.Parse<ImplementPolicy>(json);
+        Data.Require(Scalar("SELECT hash FROM implement_policy WHERE id=$i",null,("$i",p.Id))==Data.Hash(Data.Json(p)),"state_store_corrupt",13);
+        return p;
+    }
+    public bool RevokeImplementPolicies()=>Exec("UPDATE implement_policy SET revoked_at=$t WHERE revoked_at IS NULL",null,("$t",Now.ToString("O")))>0;
     public bool IsGrantIssued(Grant g)=>Scalar("SELECT hash FROM grant_issuance WHERE grant_id=$g",null,("$g",g.Id))==Data.Hash(Data.Json(g));
     public void RevokeGrant(string id){ValidId(id);Exec("INSERT OR IGNORE INTO grant_revocations VALUES($i,$t)",null,("$i",id),("$t",Now.ToString("O")));}
     public void EnsureGrantActive(string id)=>Data.Require(Scalar("SELECT id FROM grant_revocations WHERE id=$i",null,("$i",id)) is null,"grant_revoked",10);

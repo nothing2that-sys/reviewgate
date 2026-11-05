@@ -9,6 +9,7 @@ using ReviewGate.Transport.Http;
 namespace ReviewGate.CliTests;
 
 // Headless review as an agent calls it: no prompt, the standing policy decides. The CLI reviewers are fakes.
+[Collection("CliHost statics")]
 public sealed class HeadlessReviewTests
 {
     sealed class Keys : ICredentialStore
@@ -113,7 +114,7 @@ public sealed class HeadlessReviewTests
         var set = await TestEnvironment.Invoke(["policy", "set", "--state-root", e.State, "--allow-root", e.Source]);
         Assert.Equal(2, set.Exit);Assert.Equal("interactive_console_required", Data.Parse<Envelope>(set.Stdout).ErrorCode);
         var status = await TestEnvironment.Invoke(["policy", "status", "--state-root", e.State]);
-        Assert.Equal(0, status.Exit);Assert.False(Data.Parse<Envelope>(status.Stdout).Details!["active"]!.GetValue<bool>());
+        Assert.Equal(0, status.Exit);Assert.False(Data.Parse<Envelope>(status.Stdout).Details!["review"]!["active"]!.GetValue<bool>());
         using var store = new StateStore(e.State, null, "live");
         var policy = new StandingPolicy(Data.Version, Data.Id("policy"), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddDays(1), [e.Source], [new("claude-cli", "anthropic/claude-code-default")], 1, 10, ["nonsensitive"]);
         Assert.Equal("invalid_policy_channel", Assert.Throws<ReviewError>(() => store.RecordPolicy(policy, "agent")).Code);

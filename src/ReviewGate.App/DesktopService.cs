@@ -342,11 +342,27 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     public void IssuePolicy(StandingPolicy policy, string channel) { using var store = Open(); store.RecordPolicy(policy, channel); }
     public bool RevokePolicy() { using var store = Open(); return store.RevokePolicies(); }
     // A plan inside the active policy gets its grant without asking; otherwise every reason is returned.
-    public (Grant? Grant, List<string> Violations) ApproveByPolicy(string planId)
+    public (Grant? Grant, List<string> Violations) ApproveByPolicy(string planId, IReadOnlyList<string>? alsoAllowed = null)
     {
         using var store = Open();var plan = store.GetPlan(planId);var policy = store.ActivePolicy();
-        var reasons = PolicyGate.Violations(policy, plan, store.Now);
-        return reasons.Count > 0 ? (null, reasons) : (PolicyGate.Issue(store, policy!, plan), []);
+        var reasons = PolicyGate.Violations(policy, plan, store.Now, alsoAllowed);
+        return reasons.Count > 0 ? (null, reasons) : (PolicyGate.Issue(store, policy!, plan, alsoAllowed), []);
+    }
+    // ---- Implementation policy (see Implementer).
+    public ImplementPolicy? ActiveImplementPolicy() { using var store = Open(); return store.ActiveImplementPolicy(); }
+    public void IssueImplementPolicy(ImplementPolicy policy, string channel) { using var store = Open(); store.RecordImplementPolicy(policy, channel); }
+    public bool RevokeImplementPolicy() { using var store = Open(); return store.RevokeImplementPolicies(); }
+    // Workers are CLI reviewers by another name: a provider alone means its default model in settings.
+    public ImplementPolicy DraftImplementPolicy(IReadOnlyList<string> repositories, IReadOnlyList<ReviewerPick> workers, IReadOnlyList<string> checks, int maxMinutes, int days)
+    {
+        Data.Require(repositories.Count > 0 && workers.Count > 0 && maxMinutes is >= 1 and <= 240 && days is >= 1 and <= 365, "invalid_policy");
+        Data.Require(checks.All(c => !string.IsNullOrWhiteSpace(c) && c.Length <= 400 && !c.Contains('\n') && !c.Contains('\r')), "invalid_policy");
+        var repos = repositories.Select(r => Path.GetFullPath(r).TrimEnd(Path.DirectorySeparatorChar)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Data.Require(repos.All(Directory.Exists), "input_unavailable");
+        Data.Require(workers.All(w => ProviderCatalog.Get(w.Provider).IsCli && w.Model != "*"), "worker_must_be_cli");
+        var allowed = workers.Select(w => ResolveReviewers([w], false)[0].Primary).DistinctBy(m => m.Id)
+            .Select(m => new AllowedReviewer(Path.GetFileNameWithoutExtension(m.File), m.CanonicalModelKey)).ToList();
+        return new(Data.Version, Data.Id("ipolicy"), Now, Now.AddDays(days), repos, allowed, checks.Select(c => c.Trim()).Distinct().ToList(), maxMinutes);
     }
     public async Task<QuickResult> RunAsync(string planId, Grant grant, CancellationToken cancellation = default)
     {
