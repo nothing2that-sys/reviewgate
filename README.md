@@ -41,6 +41,14 @@ OpenAI, Together AI, Google AI의 제공자와 모델을 선택하여 소설 원
 | [원문·근거·HGLOS 상세 계약](docs/SOURCE_EVIDENCE_AND_HGLOS.md) | 원문 좌표·diff·독립성·처리 범위·findings projection·보존 정책 |
 | [독립 설계 검토 종결 기록](validation/design-review-20261104/DESIGN_REVIEW.md) | Claude Code 공식 사용법 적용, 독립 검토 원문·지적 반영·조건 해소·한계 |
 
+## 설치 (현재 사용자)
+
+```powershell
+.\scripts\install.ps1
+```
+
+CLI와 데스크톱 앱을 `%LOCALAPPDATA%\Programs\ReviewGate`에 설치하고, 사용자 PATH와 환경 변수 `REVIEWGATE_CLI`를 등록합니다. 새 터미널 어디서든 `reviewgate ...`로 부릅니다. 다시 실행하면 갱신, `scripts\uninstall.ps1`로 제거합니다. 자세한 사용법은 [에이전트에서 쓰기](docs/AGENT_USAGE.md)에 있습니다.
+
 ## 오프라인 실행
 
 필요 환경은 Windows의 .NET 10 SDK입니다. HGLOS 계약 테스트에만 Python 3가 필요합니다. 런타임·도구 설치나 키 설정은 자동 수행하지 않습니다.

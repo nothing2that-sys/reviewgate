@@ -12,7 +12,7 @@ dotnet restore ReviewGate.sln --locked-mode
 ./scripts/offline-demo.ps1
 ```
 
-포장 결과는 `.work/publish/ReviewGate.Cli.dll`입니다. `dotnet <dll> ...` 또는 동봉된 `.exe`로 실행합니다. framework-dependent 배포이며 실행 PC에 .NET 10 런타임이 필요합니다. 전역 설치·배포·PATH 변경은 하지 않습니다.
+포장 결과는 `.work/publish/ReviewGate.Cli.dll`입니다. `dotnet <dll> ...` 또는 동봉된 `.exe`로 실행합니다. framework-dependent 배포이며 실행 PC에 .NET 10 런타임이 필요합니다. 이 오프라인 절차는 전역 설치·PATH 변경을 하지 않습니다(사용자 설치는 `scripts/install.ps1`).
 
 ## 명령 흐름
 
