@@ -114,6 +114,22 @@ public sealed class CliReviewerTests
         Assert.False(Directory.Exists(claude.WorkingDirectory));
     }
 
+    [Fact] public async Task WebJobsTurnOnOnlyWebToolsAndAreNotOfferedToAntigravity()
+    {
+        System.Diagnostics.ProcessStartInfo? seen = null;
+        var transport = new CliTransport(exe => @"C:\fake\" + exe, psi => { seen = psi;return null; });
+        var job = new CliJob("SYSTEM", "PROMPT", "{\"type\":\"object\"}", Web: true);
+        Assert.Equal("cli_start_failed", (await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync("claude-cli", job, 60, CancellationToken.None))).Code);
+        Assert.Equal(CliTransport.WebTools, seen!.ArgumentList[seen.ArgumentList.IndexOf("--tools") + 1]);Assert.Equal(CliTransport.WebTools, seen.ArgumentList[seen.ArgumentList.IndexOf("--allowedTools") + 1]);
+        Assert.DoesNotContain("Read", seen.ArgumentList[seen.ArgumentList.IndexOf("--tools") + 1]);
+        await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync("codex-cli", job, 60, CancellationToken.None));
+        // Codex's live search is a top-level option and must come before "exec".
+        Assert.Equal(new[] { "--search", "exec" }, seen.ArgumentList.Take(2));
+        Assert.Equal("unsupported_capability", (await Assert.ThrowsAsync<ReviewError>(() => transport.RunJobAsync("agy-cli", job, 60, CancellationToken.None))).Code);
+        // Reviews never get web access.
+        var review = await CommandLine("codex-cli", null);Assert.DoesNotContain("--search", review.ArgumentList);
+    }
+
     sealed class FakeCli(Func<ReviewerProfile, TransportResult> answer) : IModelTransport
     {
         public List<string> Sent { get; } = [];

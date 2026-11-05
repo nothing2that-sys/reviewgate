@@ -16,7 +16,7 @@ namespace ReviewGate.Transport.Cli;
 public sealed class CliTransport(Func<string, string?>? locate = null, Func<ProcessStartInfo, Process?>? start = null) : IModelTransport
 {
     public const int MaxOutputBytes = 8 * 1024 * 1024;
-    public const string ReadOnlyTools = "Read,Grep,Glob";
+    public const string ReadOnlyTools = "Read,Grep,Glob", WebTools = "WebFetch,WebSearch";
     public static string AgyInstruction(string requestFile) => $"Read the review request in \"{requestFile}\" and do exactly what it says. Do not modify any file, run commands that change anything, or use the web. Answer only with JSON matching the schema.";
     readonly Func<string, string?> locate = locate ?? DefaultLocate;
     readonly Func<ProcessStartInfo, Process?> start = start ?? Process.Start;
@@ -36,14 +36,23 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
     }
     public bool HasCredential(string provider) => ProviderCatalog.Get(provider) is { IsCli: true } info && locate(info.Endpoint) is not null;
 
-    public async Task<TransportResult> SendAsync(ReviewerProfile reviewer, string body, CancellationToken cancellation)
+    // A review: the pinned plan body, the reviewer's timeout, no web access.
+    public Task<TransportResult> SendAsync(ReviewerProfile reviewer, string body, CancellationToken cancellation)
     {
-        var info = ProviderCatalog.Get(reviewer.HostingProvider);
-        Data.Require(info.IsCli, "unsupported_capability", 14);
-        string executable = locate(info.Endpoint) ?? throw new ReviewError(11, "cli_not_found");
         var request = JsonNode.Parse(body)!.AsObject();
-        string system = request["system"]!.GetValue<string>(), prompt = request["prompt"]!.GetValue<string>(), schema = request["schema"]!.ToJsonString();
-        string? model = request["model"]?.GetValue<string>(), project = request["workdir"]?.GetValue<string>();
+        var job = new CliJob(request["system"]!.GetValue<string>(), request["prompt"]!.GetValue<string>(), request["schema"]!.ToJsonString(),
+            request["model"]?.GetValue<string>(), request["workdir"]?.GetValue<string>());
+        return RunJobAsync(reviewer.HostingProvider, job, reviewer.TimeoutSeconds, cancellation);
+    }
+    // Any structured job for a CLI. Web jobs (e.g. reading official pricing pages) get only web tools: Claude Code
+    // WebFetch/WebSearch, Codex its live web search. Antigravity is not offered web jobs.
+    public async Task<TransportResult> RunJobAsync(string provider, CliJob job, int timeoutSeconds, CancellationToken cancellation)
+    {
+        var info = ProviderCatalog.Get(provider);
+        Data.Require(info.IsCli && !(job.Web && info.Id == "agy-cli"), "unsupported_capability", 14);
+        string executable = locate(info.Endpoint) ?? throw new ReviewError(11, "cli_not_found");
+        string system = job.System, prompt = job.Prompt, schema = job.Schema;
+        string? model = job.Model, project = job.Workdir;
         if (project is not null && !Directory.Exists(project)) project = null;
         string work = Path.Combine(Path.GetTempPath(), "ReviewGate-cli", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
@@ -61,11 +70,13 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             switch (info.Id)
             {
                 case "claude-cli":
-                    foreach (var a in new[] { "-p", "--output-format", "json", "--json-schema", schema, "--tools", project is null ? "" : ReadOnlyTools, "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
+                    foreach (var a in new[] { "-p", "--output-format", "json", "--json-schema", schema, "--tools", job.Web ? WebTools : project is null ? "" : ReadOnlyTools, "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
+                    if (job.Web) { psi.ArgumentList.Add("--allowedTools"); psi.ArgumentList.Add(WebTools); }
                     if (model is not null) { psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(model); }
                     stdin = prompt;
                     break;
                 case "codex-cli":
+                    if (job.Web) psi.ArgumentList.Add("--search"); // a top-level option: it must come before "exec"
                     foreach (var a in new[] { "exec", "-", "-C", project ?? work, "--skip-git-repo-check", "--ephemeral", "--json", "--output-schema", schemaFile, "-o", outFile }) psi.ArgumentList.Add(a);
                     if (model is not null) { psi.ArgumentList.Add("-m"); psi.ArgumentList.Add(model); }
                     stdin = system + "\n\n" + prompt;
@@ -83,7 +94,7 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             }
             using var process = start(psi) ?? throw new ReviewError(21, "cli_start_failed");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-            timeout.CancelAfter(TimeSpan.FromSeconds(reviewer.TimeoutSeconds));
+            timeout.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
             var stdout = ReadCapped(process.StandardOutput, timeout.Token);var stderr = ReadCapped(process.StandardError, timeout.Token);
             try
             {
@@ -185,6 +196,10 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
         };
     }
 }
+
+// One CLI request: system text, user prompt, JSON schema for the answer, optional model and working folder, and
+// whether the job may use the web (never for reviews).
+public sealed record CliJob(string System, string Prompt, string Schema, string? Model = null, string? Workdir = null, bool Web = false);
 
 // Sends each reviewer through its kind of transport: stored-key HTTP APIs or local agent CLIs.
 public sealed class RoutingTransport(IModelTransport http, IModelTransport cli) : IModelTransport, IDisposable

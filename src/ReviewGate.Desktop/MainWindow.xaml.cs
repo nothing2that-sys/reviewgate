@@ -34,6 +34,36 @@ public partial class MainWindow : Window
         SourceText.Text = DesktopService.SampleCode;
         CustomProvider.ItemsSource = ProviderCatalog.All;CustomProvider.SelectedIndex = 0;
         RefreshKeys();RefreshModels();RefreshRuns();
+        var price = RefreshPriceStatus();
+        if (price.NoticeDue && MessageBox.Show(this, price.Text + "\n\n지금 가격표를 갱신할까요?", "가격표 갱신", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+            Dispatcher.BeginInvoke(async () => await RefreshPrices());
+    });
+
+    // ---- Price snapshot: status strip, refresh by two CLIs, user approval.
+    PriceStatus RefreshPriceStatus()
+    {
+        var status = service.PriceStatus();
+        PriceBannerText.Text = status.Text + (status.NoticeDue ? "  — 갱신이 필요합니다." : "");
+        PriceBanner.Background = status.NoticeDue ? new SolidColorBrush(Color.FromRgb(0xFF, 0xF4, 0xCE)) : Brushes.Transparent;
+        return status;
+    }
+    async void OnRefreshPrices(object sender, RoutedEventArgs e) => await RefreshPrices();
+    async Task RefreshPrices() => await GuardAsync(async () =>
+    {
+        var sources = service.PriceSources();var targets = service.PriceTargets();
+        string ask = "Claude Code와 Codex가 각각 공식 가격 페이지를 읽어 모델별 단가를 찾습니다.\n\n" +
+            string.Join("\n", sources.Pages.Select(p => $"  {p.Key}: {p.Value}")) + $"\n\n대상 모델 {targets.Count}개: " + string.Join(", ", targets.Select(t => t.ModelId)) +
+            "\n\n- 두 CLI는 이 작업에서만 웹 조회 도구를 켭니다(파일 수정 도구는 켜지 않음).\n- 각 CLI의 구독 사용량을 씁니다. 몇 분 걸릴 수 있습니다.\n- 결과는 바로 적용되지 않고, 비교 화면에서 승인해야 적용됩니다.\n\n진행할까요?";
+        if (MessageBox.Show(this, ask, "가격표 갱신", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        Status("가격 조회 중… (Claude Code와 Codex가 가격 페이지를 읽는 중)");IsEnabled = false;
+        PriceProposal proposal;
+        try { proposal = await service.LookupPricesAsync(); }
+        finally { IsEnabled = true; }
+        Status("가격 조회를 마쳤습니다. 비교 화면에서 확인하세요.");
+        var review = new PriceReviewWindow(proposal, service.CurrentFreeTierModels()) { Owner = this };
+        if (review.ShowDialog() != true) { Status("가격표를 바꾸지 않았습니다."); return; }
+        var status = service.ApprovePrices(proposal, review.FreeTierModels);
+        RefreshPriceStatus();RefreshModels();Status("새 가격표를 적용했습니다: " + status.Text);
     });
 
     // ---- API keys: one panel per provider; names only, never values.
@@ -280,6 +310,7 @@ public partial class MainWindow : Window
     {
         "credential_missing" => "사용 중인 API 키가 없거나 CLI가 설치되어 있지 않습니다. API 키 탭을 확인하세요",
         "cli_not_found" => "CLI 실행 파일을 찾지 못했습니다",
+        "no_agreed_prices" => "두 CLI가 일치한 가격이 하나도 없어 가격표를 만들 수 없습니다",
         "unauthorized" => "제공자가 API 키를 거부했습니다",
         "price_missing" => "선택한 모델의 가격 정보가 없습니다. 모델 탭에서 가격을 입력하거나 무료로 표시하세요",
         "price_snapshot_unavailable" or "price_snapshot_expired" => "가격표 유효기간이 지났습니다. 가격표를 갱신해야 합니다",

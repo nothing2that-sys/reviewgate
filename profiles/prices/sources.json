@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "pages": {
+    "openai": "https://developers.openai.com/api/docs/pricing",
+    "together": "https://www.together.ai/pricing",
+    "google": "https://aistudio.google.com/docs/pricing"
+  }
+}

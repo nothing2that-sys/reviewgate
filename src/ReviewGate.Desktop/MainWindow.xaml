@@ -7,6 +7,13 @@
         <StatusBar DockPanel.Dock="Bottom">
             <StatusBarItem><TextBlock x:Name="StatusText" Text="준비" /></StatusBarItem>
         </StatusBar>
+        <!-- Price snapshot status: highlighted from 7 days before expiry; refresh asks Claude Code and Codex, then the user approves -->
+        <Border x:Name="PriceBanner" DockPanel.Dock="Top" Margin="8,8,8,0" Padding="10,6" BorderThickness="1" BorderBrush="#D0D0D0" CornerRadius="3">
+            <DockPanel>
+                <Button DockPanel.Dock="Right" Content="가격표 갱신" Click="OnRefreshPrices" />
+                <TextBlock x:Name="PriceBannerText" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,10,0" />
+            </DockPanel>
+        </Border>
         <TabControl Margin="8">
             <!-- API keys: one panel per provider in the catalog, built in code -->
             <TabItem Header="API 키">

@@ -32,12 +32,19 @@ public record QuickPreview(string PlanId, string Mode, int Requests, decimal Res
 public record FindingView(string Reviewer, string Kind, string Severity, string Location, string Claim, string Detail, string Quote, string Evidence);
 public record QuickResult(string? RunId, string Status, string? ErrorCode, decimal UsageUsd, decimal UnknownHoldUsd, decimal? ProcessingRatio,
     List<FindingView> Findings, List<string> UnitNotes, string? ReportPath);
+public record PriceStatus(string SnapshotId, DateTimeOffset EffectiveTo, int DaysLeft, bool Expired, bool UserApproved)
+{
+    public bool NoticeDue => Expired || DaysLeft <= PriceRefresh.NoticeDays;
+    public string Text => Expired ? $"가격표가 만료되었습니다({EffectiveTo.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} KST). 유료 모델은 갱신 전까지 실행되지 않습니다." :
+        $"가격표 {SnapshotId}{(UserApproved ? " (사용자 승인)" : "")} · {EffectiveTo.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} KST 만료 ({DaysLeft}일 남음)";
+}
 public record RunView(string RunId, string Project, string Status, string? ErrorCode, DateTimeOffset Created, decimal UsageUsd, decimal UnknownHoldUsd);
 
 // Everything the desktop screens do, without any UI type. It drives the same planner, ledger, grant and engine
 // as the CLI; the only desktop-specific parts are where settings live and how approval is collected.
 public sealed class DesktopService(string stateRoot, string profilesRoot, ICredentialStore credentials,
-    Func<HttpMessageHandler?>? handler = null, Func<DateTimeOffset>? clock = null, Func<IModelTransport>? cli = null, Func<string, string?>? locateCli = null)
+    Func<HttpMessageHandler?>? handler = null, Func<DateTimeOffset>? clock = null, Func<IModelTransport>? cli = null, Func<string, string?>? locateCli = null,
+    Func<string, ReviewGate.Transport.Cli.CliJob, CancellationToken, Task<TransportResult>>? cliJob = null)
 {
     public const string Project = "desktop";
     public static IEnumerable<string> Providers => ProviderCatalog.Ids;
@@ -46,6 +53,8 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     string SettingsFile => Path.Combine(DesktopDir, "settings.json");
     string CustomReviewers => Path.Combine(DesktopDir, "reviewers");
     string CustomPricesFile => Path.Combine(DesktopDir, "custom-prices.json");
+    string ApprovedPrices => Path.Combine(DesktopDir, "prices", "approved");
+    DateTimeOffset Now => (clock ?? (() => DateTimeOffset.UtcNow))();
     StateStore Open() => new(stateRoot, clock, "live");
 
     // ---- API keys: names and which one is active; values are written once and never read back to the UI.
@@ -105,21 +114,69 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         File.Delete(model.File);
         if (File.Exists(CustomPricesFile)) Replace(CustomPricesFile, Data.Json(Data.Read<List<PriceRow>>(CustomPricesFile).Where(r => r.CanonicalModelKey != model.CanonicalModelKey).ToList()));
     }
-    // Shipped snapshots are live-<date>.json (paid) and live-<date>-google-free.json (Google rows at the free tier).
-    // The one whose window covers now is used; before the first or after the last, the nearest one is used, so
-    // all-zero-price plans keep working and paid plans stop with price_snapshot_expired until prices are refreshed.
-    public static PriceSnapshot ShippedPrices(string folder, bool googleFree, DateTimeOffset now)
+    // Shipped snapshots are live-<date>.json (paid) and live-<date>-google-free.json (Google rows at the free tier);
+    // snapshots the user approved after a price refresh live in the desktop folder as user-<stamp>[-google-free].json.
+    // Among those whose window covers now, the most recently retrieved wins (a fresh approval beats a shipped file).
+    // With none in its window, the nearest one is used, so all-zero-price plans keep working and paid plans stop
+    // with price_snapshot_expired until prices are refreshed.
+    public static PriceSnapshot ShippedPrices(string folder, bool googleFree, DateTimeOffset now, string? approvedFolder = null)
     {
-        var all = Directory.GetFiles(folder, "live-*.json").Where(f => f.EndsWith("-google-free.json", StringComparison.Ordinal) == googleFree)
-            .Select(Data.Read<PriceSnapshot>).OrderBy(s => s.EffectiveFrom).ToList();
+        var files = Directory.GetFiles(folder, "live-*.json").Concat(approvedFolder is not null && Directory.Exists(approvedFolder) ? Directory.GetFiles(approvedFolder, "user-*.json") : []);
+        var all = files.Where(f => f.EndsWith("-google-free.json", StringComparison.Ordinal) == googleFree)
+            .Select(Data.Read<PriceSnapshot>).OrderBy(s => s.EffectiveFrom).ThenBy(s => s.RetrievedAt).ToList();
         Data.Require(all.Count > 0, "price_snapshot_unavailable", 12);
-        return all.LastOrDefault(s => PriceRules.InWindow(s, now)) ?? all.LastOrDefault(s => s.EffectiveFrom <= now) ?? all[0];
+        return all.Where(s => PriceRules.InWindow(s, now)).MaxBy(s => s.RetrievedAt) ?? all.LastOrDefault(s => s.EffectiveFrom <= now) ?? all[0];
+    }
+
+    // ---- Price refresh: expiry notice, CLI lookup, user approval.
+    public PriceStatus PriceStatus()
+    {
+        var s = ShippedPrices(Path.Combine(profilesRoot, "prices"), LoadSettings().GoogleFreeTier, Now, ApprovedPrices);
+        bool expired = !PriceRules.InWindow(s, Now);
+        return new(s.Id, s.EffectiveTo, expired ? 0 : (int)Math.Ceiling((s.EffectiveTo - Now).TotalDays), expired, s.Id.StartsWith("user-", StringComparison.Ordinal));
+    }
+    // Google models priced at the free tier in the free-tier snapshot in use (the default for the approval checkboxes).
+    public IReadOnlySet<string> CurrentFreeTierModels() =>
+        ShippedPrices(Path.Combine(profilesRoot, "prices"), true, Now, ApprovedPrices).Prices.Where(p => p.Tier == "free").Select(p => p.CanonicalModelKey).ToHashSet();
+    public PriceSources PriceSources() => Data.Read<PriceSources>(Path.Combine(profilesRoot, "prices", "sources.json"));
+    // Shipped API models only: user-added models keep the prices the user typed, and CLIs have no token price.
+    public List<PriceTarget> PriceTargets()
+    {
+        var pages = PriceSources().Pages;
+        return Directory.GetFiles(Path.Combine(profilesRoot, "reviewers"), "*.json").Select(Data.Read<ReviewerProfile>)
+            .Where(r => !ProviderCatalog.Get(r.HostingProvider).IsCli && pages.ContainsKey(r.HostingProvider))
+            .Select(r => new PriceTarget(r.HostingProvider, r.ModelId, r.CanonicalModelKey, pages[r.HostingProvider]))
+            .OrderBy(t => ProviderCatalog.Ids.ToList().IndexOf(t.Provider)).ThenBy(t => t.ModelId, StringComparer.Ordinal).ToList();
+    }
+    // Claude Code and Codex read the pages independently and in parallel; the comparison is against the paid snapshot in use.
+    public async Task<PriceProposal> LookupPricesAsync(CancellationToken cancellation = default)
+    {
+        var targets = PriceTargets();var now = Now;
+        var job = new ReviewGate.Transport.Cli.CliJob(PriceRefresh.System, PriceRefresh.Prompt(targets, now), PriceRefresh.Schema(), Web: true);
+        var run = cliJob ?? ((provider, j, ct) => new ReviewGate.Transport.Cli.CliTransport(locateCli).RunJobAsync(provider, j, 900, ct));
+        async Task<PriceLookup> One(string provider)
+        {
+            try { return PriceRefresh.Read(provider, await run(provider, job, cancellation)); }
+            catch (ReviewError e) { return new(provider, "failed", e.Code, []); }
+        }
+        var lookups = await Task.WhenAll(PriceRefresh.Clis.Select(One));
+        return PriceRefresh.Compare(targets, lookups, ShippedPrices(Path.Combine(profilesRoot, "prices"), false, now, ApprovedPrices), now);
+    }
+    // Writes the approved pair and its excerpt; from now on they are the snapshots in use until they expire.
+    public PriceStatus ApprovePrices(PriceProposal proposal, IReadOnlySet<string> freeTierModels)
+    {
+        Data.Require(proposal.Rows.Any(r => r.Agreed), "no_agreed_prices", 12);
+        var (paid, free, excerpt) = PriceRefresh.Build(proposal, freeTierModels, PriceSources(), Now);
+        Data.CreateFile(Path.Combine(ApprovedPrices, paid.Id + ".md"), excerpt);
+        Data.CreateFile(Path.Combine(ApprovedPrices, paid.Id + ".json"), Data.Json(paid));
+        Data.CreateFile(Path.Combine(ApprovedPrices, free.Id + ".json"), Data.Json(free));
+        return PriceStatus();
     }
     // The shipped snapshot (paid, or with Google rows at the free tier) plus user rows, written content-addressed so a
     // plan's pinned price file never changes underneath it.
     public (PriceSnapshot Snapshot, string Path) MergedPrices()
     {
-        var snapshot = ShippedPrices(Path.Combine(profilesRoot, "prices"), LoadSettings().GoogleFreeTier, (clock ?? (() => DateTimeOffset.UtcNow))());
+        var snapshot = ShippedPrices(Path.Combine(profilesRoot, "prices"), LoadSettings().GoogleFreeTier, Now, ApprovedPrices);
         var custom = File.Exists(CustomPricesFile) ? Data.Read<List<PriceRow>>(CustomPricesFile) : [];
         if (custom.Count > 0)
             snapshot = snapshot with
