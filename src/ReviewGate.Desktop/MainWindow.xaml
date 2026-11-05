@@ -149,6 +149,82 @@
                 </Grid>
             </TabItem>
 
+            <!-- Implementation -->
+            <TabItem Header="구현">
+                <Grid Margin="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="440" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
+                        <StackPanel>
+                            <TextBlock Text="저장소 (git 루트 폴더)" FontWeight="SemiBold" />
+                            <DockPanel Margin="0,4">
+                                <Button DockPanel.Dock="Right" Content="폴더" Click="OnPickRepo" Margin="4,0,0,0" MinWidth="50" />
+                                <TextBox x:Name="ImplRepo" />
+                            </DockPanel>
+                            <TextBlock Text="지시문 파일 (md, txt)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <DockPanel Margin="0,4">
+                                <Button DockPanel.Dock="Right" Content="파일" Click="OnPickInstructionFile" Margin="4,0,0,0" MinWidth="50" />
+                                <TextBox x:Name="ImplInstructionFile" />
+                            </DockPanel>
+                            <TextBlock Text="추가 지시 (선택 — 파일이 없으면 여기에만 써도 됨)" Style="{StaticResource Hint}" />
+                            <TextBox x:Name="ImplInstruction" Height="70" TextWrapping="Wrap" AcceptsReturn="True" Margin="0,4" VerticalScrollBarVisibility="Auto" />
+                            <TextBlock Text="작업자 (구현할 CLI — 파일 편집만, 명령 실행 불가)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <ComboBox x:Name="ImplWorker" DisplayMemberPath="Label" Margin="0,4" />
+                            <TextBlock Text="교차 검수자 (작업자와 다른 모델)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <ComboBox x:Name="ImplReviewerA" DisplayMemberPath="Label" Margin="0,4" />
+                            <ComboBox x:Name="ImplReviewerB" DisplayMemberPath="Label" Margin="0,4" />
+                            <CheckBox x:Name="ImplUseFallback" Content="검수자의 대표 모델이 응답하지 않으면 서브 모델 사용" IsChecked="True" Margin="0,4" />
+                            <TextBlock Text="확인 명령 (한 줄에 하나, 작업 뒤 ReviewGate가 실행 — 바뀐 코드를 실행함)" FontWeight="SemiBold" Margin="0,8,0,0" TextWrapping="Wrap" />
+                            <TextBox x:Name="ImplChecks" Height="50" AcceptsReturn="True" FontFamily="Consolas" Margin="0,4" VerticalScrollBarVisibility="Auto" />
+                            <StackPanel Orientation="Horizontal" Margin="0,4">
+                                <TextBlock Text="시간 상한(분) " VerticalAlignment="Center" />
+                                <TextBox x:Name="ImplMinutes" Width="50" Text="30" />
+                                <TextBlock Text="   검수 비용 상한(USD) " VerticalAlignment="Center" />
+                                <TextBox x:Name="ImplReviewUsd" Width="60" Text="1" />
+                            </StackPanel>
+                            <TextBlock Text="이어서 고칠 브랜치 (비우면 현재 HEAD에서 새 브랜치)" FontWeight="SemiBold" Margin="0,8,0,0" />
+                            <TextBox x:Name="ImplContinueBranch" Margin="0,4" FontFamily="Consolas" />
+                            <CheckBox x:Name="ImplConfirmNonSensitive" Margin="0,8,0,0">
+                                <TextBlock TextWrapping="Wrap" Text="이 저장소 내용을 작업자·검수자(CLI 계정, API 제공자)에게 보내도 됩니다." />
+                            </CheckBox>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <Button x:Name="ImplRunButton" Content="확인하고 구현 시작" Click="OnImplement" />
+                                <Button x:Name="ImplCancelButton" Content="취소" Click="OnCancelImplement" IsEnabled="False" />
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <DockPanel Grid.Column="1">
+                        <TextBox DockPanel.Dock="Top" x:Name="ImplSummary" Height="150" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="#F7F7F7" />
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,6,0,0">
+                            <Button x:Name="ImplMergeButton" Content="현재 브랜치에 병합" Click="OnMergeImplementation" IsEnabled="False" />
+                            <Button x:Name="ImplContinueButton" Content="이 브랜치에 이어서 고치기" Click="OnContinueImplementation" IsEnabled="False" />
+                            <Button x:Name="ImplDiscardButton" Content="버리기" Click="OnDiscardImplementation" IsEnabled="False" />
+                            <Button x:Name="ImplReportButton" Content="검수 보고서" Click="OnShowImplReport" IsEnabled="False" />
+                        </StackPanel>
+                        <DataGrid DockPanel.Dock="Bottom" x:Name="ImplFindings" Height="150" Margin="0,6,0,0" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" RowDetailsVisibilityMode="VisibleWhenSelected">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="검수자" Binding="{Binding Reviewer}" Width="120" />
+                                <DataGridTextColumn Header="심각도" Binding="{Binding Severity}" Width="70" />
+                                <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="120" />
+                                <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
+                                <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="150" />
+                            </DataGrid.Columns>
+                            <DataGrid.RowDetailsTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="8">
+                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" />
+                                        <TextBox Text="{Binding Quote, Mode=OneWay}" IsReadOnly="True" FontFamily="Consolas" Margin="0,6,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGrid.RowDetailsTemplate>
+                        </DataGrid>
+                        <TextBox x:Name="ImplDiff" IsReadOnly="True" FontFamily="Consolas" Margin="0,6,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
             <!-- History -->
             <TabItem Header="실행 기록">
                 <DockPanel Margin="12">

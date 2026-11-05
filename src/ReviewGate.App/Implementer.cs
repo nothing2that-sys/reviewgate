@@ -16,8 +16,12 @@ namespace ReviewGate.App;
 //   Base           commit/branch to start from (default HEAD); ContinueBranch instead adds a commit on an existing
 //                  reviewgate/impl-* branch (e.g. to fix review findings)
 //   Checks         commands from the implementation policy, run by ReviewGate in the worktree after the commit
+//   PersonReviewMaxUsd  set only by the desktop app after a person confirmed this run (channel desktop_confirm): the
+//                  standing policies are then not consulted, the checks are what that person typed, and the value caps
+//                  the cross-review's reservation. Headless callers never set it.
 public record ImplementRequest(string Instruction, string Repository, ReviewerPick Worker, List<ReviewerPick> Reviewers, string? Base = null,
-    string? ContinueBranch = null, List<string>? Checks = null, int? MaxMinutes = null, bool UseFallbacks = true, bool NoReview = false);
+    string? ContinueBranch = null, List<string>? Checks = null, int? MaxMinutes = null, bool UseFallbacks = true, bool NoReview = false,
+    decimal? PersonReviewMaxUsd = null);
 public record ImplementOutcome(int ExitCode, string Status, string? ErrorCode, string? RequiredAction, JsonObject Details);
 public delegate Task<TransportResult> WorkerRunner(string provider, CliJob job, int timeoutSeconds, CancellationToken cancellation);
 
@@ -58,8 +62,7 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
     // policy would let them read this repository. Size caps are checked when the review is planned.
     List<string> ReviewPrecheck(List<(ModelOption Primary, ModelOption? Fallback)> reviewers, AllowedReviewer worker, string repository)
     {
-        var reasons = new List<string>();var models = reviewers.SelectMany(x => new[] { x.Primary, x.Fallback }).OfType<ModelOption>().ToList();
-        foreach (var m in models.Where(m => m.CanonicalModelKey == worker.CanonicalModelKey)) reasons.Add($"reviewer_same_as_worker: {Key(m).Id} ({m.CanonicalModelKey})");
+        var reasons = SameAsWorker(reviewers, worker);var models = reviewers.SelectMany(x => new[] { x.Primary, x.Fallback }).OfType<ModelOption>().ToList();
         var policy = service.ActivePolicy();
         if (policy is null) { reasons.Add("no_active_review_policy"); return reasons; }
         if (Now >= policy.ExpiresAt) reasons.Add($"review_policy_expired: {policy.ExpiresAt:O}");
@@ -67,6 +70,30 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         foreach (var m in models.Where(m => !policy.Reviewers.Contains(Key(m)))) reasons.Add($"reviewer_not_allowed: {Key(m).Id} ({m.CanonicalModelKey})");
         return reasons;
     }
+
+    // The desktop's instruction: a Markdown/text file's content (named, so the worker knows where it came from), then
+    // any extra text typed in the app. At least one is needed.
+    public static string ComposeInstruction(string? file, string? extra)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(file))
+        {
+            string path = SafePath.Full(file.Trim());
+            Data.Require(File.Exists(path), "input_unavailable");
+            Data.Require(Path.GetExtension(path).ToLowerInvariant() is ".md" or ".markdown" or ".txt", "unsupported_instruction_file");
+            Data.Require(new FileInfo(path).Length <= 262_144, "instruction_too_large");
+            string text = File.ReadAllText(path, Data.Utf8).Trim();
+            Data.Require(text.Length > 0, "instruction_required");
+            parts.Add($"## 지시문 ({Path.GetFileName(path)})\n{text}");
+        }
+        if (!string.IsNullOrWhiteSpace(extra)) parts.Add(parts.Count == 0 ? extra.Trim() : "## 추가 지시\n" + extra.Trim());
+        Data.Require(parts.Count > 0, "instruction_required");
+        return string.Join("\n\n", parts);
+    }
+    // The cross-review is never done by the worker's own model, whoever approved the run.
+    static List<string> SameAsWorker(List<(ModelOption Primary, ModelOption? Fallback)> reviewers, AllowedReviewer worker) =>
+        reviewers.SelectMany(x => new[] { x.Primary, x.Fallback }).OfType<ModelOption>().Where(m => m.CanonicalModelKey == worker.CanonicalModelKey)
+            .Select(m => $"reviewer_same_as_worker: {Key(m).Id} ({m.CanonicalModelKey})").ToList();
 
     public async Task<ImplementOutcome> RunAsync(ImplementRequest q, CancellationToken ct = default)
     {
@@ -76,7 +103,9 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         Data.Require(q.Base is null || q.ContinueBranch is null, "invalid_option_combination");
         Data.Require(q.Base is null || Regex.IsMatch(q.Base, @"^[A-Za-z0-9][A-Za-z0-9._/^~-]{0,199}$"), "invalid_base");
         Data.Require(q.ContinueBranch is null || Regex.IsMatch(q.ContinueBranch, @"^reviewgate/impl-[A-Za-z0-9._-]{1,120}$"), "invalid_branch");
-        Data.Require(q.MaxMinutes is null or >= 1, "invalid_max_minutes");
+        Data.Require(q.MaxMinutes is null or (>= 1 and <= 240), "invalid_max_minutes");
+        Data.Require(q.PersonReviewMaxUsd is null or >= 0, "invalid_grant");
+        Data.Require((q.Checks ?? []).All(c => !string.IsNullOrWhiteSpace(c) && c.Length <= 400 && !c.Contains('\n') && !c.Contains('\r')), "invalid_check");
         string repo = SafePath.Full(q.Repository);
         Data.Require(Directory.Exists(repo), "input_unavailable");SafePath.NoLinks(repo);
         var top = await Git(repo, ct, "rev-parse", "--show-toplevel");
@@ -93,8 +122,10 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
             ["repository"] = repo, ["worker"] = new JsonObject { ["id"] = workerKey.Id, ["model"] = workerKey.CanonicalModelKey },
             ["reviewers"] = Arr(reviewers.SelectMany(r => new[] { r.Primary, r.Fallback }).OfType<ModelOption>().Select(m => Key(m).Id)), ["checks_requested"] = Arr(checks), ["max_minutes"] = minutes
         };
-        var violations = Violations(policy, repo, workerKey, checks, minutes, Now);
-        if (!q.NoReview) violations.AddRange(ReviewPrecheck(reviewers, workerKey, repo));
+        bool person = q.PersonReviewMaxUsd is not null;
+        details["approved_by"] = person ? "desktop_confirm" : policy is null ? null : "implement_policy:" + policy.Id;
+        var violations = person ? [] : Violations(policy, repo, workerKey, checks, minutes, Now);
+        if (!q.NoReview) violations.AddRange(person ? SameAsWorker(reviewers, workerKey) : ReviewPrecheck(reviewers, workerKey, repo));
         if (violations.Count > 0) { details["violations"] = Arr(violations); return new(10, "approval_required", "policy_violation", "ask_user_to_widen_policy", details); }
 
         string id = Data.Id("impl"), runDir = Path.Combine(SafePath.Full(stateRoot), "implement", id), wt = Path.Combine(WorktreeRoot(stateRoot), id);
@@ -197,6 +228,29 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         return new JsonObject { ["repository"] = repo, ["branch"] = branch, ["deleted"] = true };
     }
 
+    // Merges a finished branch into the caller's current branch (desktop "merge" button). The checkout must have no
+    // tracked changes; a conflict is aborted so the checkout stays as it was. Hooks are off, as for the worker's
+    // commit. The merged branch is deleted.
+    public async Task<JsonObject> MergeAsync(string repository, string branch, CancellationToken ct = default)
+    {
+        Data.Require(Regex.IsMatch(branch, @"^reviewgate/impl-[A-Za-z0-9._-]{1,120}$"), "invalid_branch");
+        string repo = SafePath.Full(repository);Data.Require(Directory.Exists(repo), "input_unavailable");
+        Data.Require((await Must(repo, ct, "status", "--porcelain", "--untracked-files=no")).Trim().Length == 0, "checkout_not_clean");
+        string target = (await Must(repo, ct, "branch", "--show-current")).Trim();
+        Data.Require(target.Length > 0 && !target.StartsWith(BranchPrefix, StringComparison.Ordinal), "invalid_merge_target");
+        string noHooks = Path.Combine(SafePath.Full(stateRoot), "implement", "no-hooks");Directory.CreateDirectory(noHooks);
+        var merged = await Git(repo, ct, "-c", "core.hooksPath=" + noHooks, "merge", "--no-ff", "--no-edit", "--end-of-options", branch);
+        if (merged.Exit != 0)
+        {
+            await Git(repo, CancellationToken.None, "merge", "--abort");
+            string why = (merged.Out + merged.Err).Trim();
+            throw new ReviewError(20, why.Contains("CONFLICT", StringComparison.Ordinal) ? "merge_conflict" : "merge_failed", why[..Math.Min(why.Length, 300)]);
+        }
+        string commit = (await Must(repo, ct, "rev-parse", "HEAD")).Trim();
+        await Git(repo, ct, "branch", "-d", "--end-of-options", branch);
+        return new JsonObject { ["repository"] = repo, ["branch"] = branch, ["into"] = target, ["commit"] = commit };
+    }
+
     async Task<JsonObject> ReviewAsync(ImplementRequest q, string wt, string baseCommit, AllowedReviewer worker, List<(string Status, string Path)> files, string diff, CancellationToken ct)
     {
         var inputs = files.Where(f => !f.Status.StartsWith('D')).Select(f => f.Path).Where(p => File.Exists(Path.Combine(wt, p))).ToList();
@@ -209,7 +263,14 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
         try
         {
             var preview = service.PrepareReview(new(q.Reviewers, instruction, wt, inputs, [], wt, "code", q.UseFallbacks, ("impl-" + slug)[..Math.Min(80, slug.Length + 5)]));
-            var (grant, violations) = service.ApproveByPolicy(preview.PlanId, [wt]);
+            Grant? grant;List<string> violations = [];
+            if (q.PersonReviewMaxUsd is decimal cap)
+            {
+                // The person approved the run with this cap; a larger review is not sent.
+                if (preview.ReservationUsd > cap) { grant = null;violations.Add($"over_review_cap: {preview.ReservationUsd.ToString(CultureInfo.InvariantCulture)} > {cap.ToString(CultureInfo.InvariantCulture)} USD"); }
+                else grant = service.Approve(preview.PlanId, Math.Max(cap, 0.000001m));
+            }
+            else (grant, violations) = service.ApproveByPolicy(preview.PlanId, [wt]);
             var plan = new JsonObject { ["plan_id"] = preview.PlanId, ["requests"] = preview.Requests, ["reservation_upper_usd"] = preview.ReservationUsd, ["excluded"] = Arr(preview.Exclusions) };
             if (grant is null) return new JsonObject { ["status"] = "approval_required", ["violations"] = Arr(violations), ["plan"] = plan };
             var result = await service.RunAsync(preview.PlanId, grant, ct);

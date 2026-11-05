@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -79,7 +80,7 @@ public partial class MainWindow : Window
                 var cliBody = new StackPanel();
                 cliBody.Children.Add(new TextBlock { Style = (Style)FindResource("Hint"), Text = group.CliPath is null
                     ? $"{group.Provider.Endpoint}를 찾지 못했습니다. CLI를 설치하고 한 번 로그인하세요."
-                    : "이 CLI에 로그인한 계정(구독)으로 실행됩니다. ReviewGate는 키를 저장하지 않습니다. 샌드박스 없이 매번 빈 임시 폴더에서 실행합니다." });
+                    : "이 CLI에 로그인한 계정(구독)으로 실행됩니다. ReviewGate는 키를 저장하지 않습니다. 샌드박스 없이 실행합니다: 검수는 검수 폴더에서(읽기 전용 지시), 구현은 저장소 밖 별도 worktree에서(파일 편집만, 명령 불가)." });
                 var cliTest = new Button { Content = "연결 테스트", IsEnabled = group.CliPath is not null, Margin = new Thickness(0, 6, 0, 0), HorizontalAlignment = HorizontalAlignment.Left };
                 cliTest.Click += async (_, _) => await ConnectionTest(provider);cliBody.Children.Add(cliTest);
                 KeyPanels.Children.Add(new GroupBox
@@ -167,6 +168,7 @@ public partial class MainWindow : Window
         ReviewerA.ItemsSource = choices;ReviewerA.SelectedItem = choices.FirstOrDefault(c => c.Primary is not null && c.Label.Contains("사용 중 키", StringComparison.Ordinal)) ?? choices.FirstOrDefault();
         var second = new List<ReviewerChoice> { new("(없음 — 단일 검수)", "", null, null) };second.AddRange(choices);
         ReviewerB.ItemsSource = second;ReviewerB.SelectedIndex = 0;
+        RefreshImplementChoices(choices);
     }
     void AddRow(UIElement provider, UIElement primary, UIElement fallback)
     {
@@ -254,13 +256,131 @@ public partial class MainWindow : Window
     // The report is shown as text inside the app; ReviewGate never launches other programs.
     void OnShowReport(object sender, RoutedEventArgs e) => Guard(() =>
     {
-        if (reportPath is null) return;
-        new Window
-        {
-            Title = "보고서 — " + reportPath, Owner = this, Width = 900, Height = 700,
-            Content = new TextBox { Text = File.ReadAllText(reportPath), IsReadOnly = true, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
-        }.ShowDialog();
+        if (reportPath is not null) ShowText("보고서 — " + reportPath, File.ReadAllText(reportPath));
     });
+
+    // ---- Implementation: a CLI worker changes a new branch in a separate worktree; the person confirms before it
+    // starts (that confirmation replaces the standing policies here) and decides afterwards: merge, continue, discard.
+    Implementer? implementerField;
+    Implementer Implementer => implementerField ??= new(service, StatePaths.DefaultRoot);
+    CancellationTokenSource? implementing;
+    string? implRepo, implBranch, implReport;
+    List<FindingView> implFindings = [];
+    void RefreshImplementChoices(List<ReviewerChoice> choices)
+    {
+        var workers = choices.Where(c => ProviderCatalog.Get(c.Provider).IsCli).ToList();
+        object? keepWorker = ImplWorker.SelectedItem;ImplWorker.ItemsSource = workers;
+        ImplWorker.SelectedItem = workers.FirstOrDefault(c => c.Provider == (keepWorker as ReviewerChoice)?.Provider) ?? workers.FirstOrDefault(c => c.Provider == "codex-cli") ?? workers.FirstOrDefault();
+        var first = new List<ReviewerChoice> { new("(없음 — 교차 검수 안 함)", "", null, null) };first.AddRange(choices);
+        var second = new List<ReviewerChoice> { new("(없음)", "", null, null) };second.AddRange(choices);
+        ImplReviewerA.ItemsSource = first;ImplReviewerA.SelectedItem = first.FirstOrDefault(c => c.Provider == "claude-cli") ?? first[0];
+        ImplReviewerB.ItemsSource = second;ImplReviewerB.SelectedIndex = 0;
+    }
+    void OnPickRepo(object sender, RoutedEventArgs e)
+    { var dialog = new OpenFolderDialog { Title = "구현할 git 저장소 (루트 폴더)" };if (dialog.ShowDialog(this) == true) ImplRepo.Text = dialog.FolderName; }
+    void OnPickInstructionFile(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "지시문 파일", Filter = "지시문 (*.md;*.markdown;*.txt)|*.md;*.markdown;*.txt" };
+        if (dialog.ShowDialog(this) == true) ImplInstructionFile.Text = dialog.FileName;
+    }
+    async void OnImplement(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
+    {
+        if (ImplWorker.SelectedItem is not ReviewerChoice { Primary: not null } worker) { Say("작업자를 선택하세요. 대표 모델이 없으면 모델 탭에서 정하세요.");return; }
+        var reviewers = new[] { ImplReviewerA.SelectedItem, ImplReviewerB.SelectedItem }.OfType<ReviewerChoice>().Where(c => c.Provider.Length > 0).ToList();
+        if (reviewers.FirstOrDefault(c => c.Primary is null) is { } missing) { Say($"{missing.Label}\n모델 탭에서 대표 모델을 정하세요.");return; }
+        if (string.IsNullOrWhiteSpace(ImplRepo.Text)) { Say("저장소 폴더를 고르세요.");return; }
+        if (ImplConfirmNonSensitive.IsChecked != true) { Say("저장소 내용을 보내도 되는지 확인란을 선택하세요.");return; }
+        if (!int.TryParse(ImplMinutes.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int minutes) || minutes is < 1 or > 240) { Say("시간 상한은 1~240분으로 입력하세요.");return; }
+        if (!decimal.TryParse(ImplReviewUsd.Text, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal reviewUsd) || reviewUsd < 0) { Say("검수 비용 상한을 숫자(USD)로 입력하세요.");return; }
+        string instruction = Implementer.ComposeInstruction(ImplInstructionFile.Text, ImplInstruction.Text);
+        var checks = ImplChecks.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        string? continueBranch = string.IsNullOrWhiteSpace(ImplContinueBranch.Text) ? null : ImplContinueBranch.Text.Trim();
+        string ask = $"저장소: {ImplRepo.Text}\n시작: {(continueBranch is null ? "현재 HEAD에서 새 브랜치 reviewgate/impl-…" : continueBranch + "에 이어서 커밋")}\n" +
+            $"작업자: {worker.Label}\n교차 검수: {(reviewers.Count == 0 ? "안 함" : string.Join(" / ", reviewers.Select(r => r.Label)))}\n" +
+            $"확인 명령: {(checks.Count == 0 ? "없음" : string.Join(" ; ", checks))}\n시간 상한: {minutes}분 · 검수 비용 상한: ${reviewUsd.ToString(CultureInfo.InvariantCulture)}\n\n" +
+            $"지시 (앞부분):\n{(instruction.Length > 400 ? instruction[..400] + " …" : instruction)}\n\n" +
+            "- 작업자는 저장소 밖 별도 폴더(worktree)에서 새 브랜치만 고칩니다. 파일 편집만 하고 명령은 실행하지 못합니다.\n" +
+            "- 지금 작업 폴더와 현재 브랜치는 바뀌지 않습니다. 병합은 결과를 본 뒤 직접 고릅니다.\n" +
+            "- 확인 명령은 바뀐 코드를 실행합니다. CLI는 로그인한 구독 계정으로 처리됩니다.\n\n시작할까요?";
+        if (MessageBox.Show(this, ask, "구현 시작 확인", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        implementing = new CancellationTokenSource();ImplRunButton.IsEnabled = false;ImplCancelButton.IsEnabled = true;SetImplActions(false);
+        Status("구현 중… (작업자 → 확인 명령 → 교차 검수, 몇 분 걸릴 수 있습니다)");ImplSummary.Text = "실행 중…";ImplDiff.Text = "";ImplFindings.ItemsSource = null;
+        try
+        {
+            var outcome = await Implementer.RunAsync(new(instruction, ImplRepo.Text, new(worker.Provider, null), reviewers.Select(r => new ReviewerPick(r.Provider, null)).ToList(),
+                null, continueBranch, checks, minutes, ImplUseFallback.IsChecked == true, reviewers.Count == 0, reviewUsd), implementing.Token);
+            ShowImplementation(outcome);RefreshRuns();Status("구현 실행을 마쳤습니다. 결과를 보고 병합·이어서 고치기·버리기를 고르세요.");
+        }
+        finally { implementing.Dispose();implementing = null;ImplRunButton.IsEnabled = true;ImplCancelButton.IsEnabled = false; }
+    });
+    void OnCancelImplement(object sender, RoutedEventArgs e) { implementing?.Cancel();Status("구현 취소를 요청했습니다."); }
+    void SetImplActions(bool on) => ImplMergeButton.IsEnabled = ImplContinueButton.IsEnabled = ImplDiscardButton.IsEnabled = on;
+    void ShowImplementation(ImplementOutcome o)
+    {
+        var d = o.Details;string? S(JsonNode? n) => n?.GetValue<string>();
+        implRepo = S(d["repository"]);implBranch = S(d["branch"]);implReport = S(d["review"]?["report_path"]);
+        var text = new System.Text.StringBuilder();
+        text.AppendLine($"상태: {ImplStatusLabel(o.Status)}{(o.ErrorCode is null ? "" : $" ({Explain(o.ErrorCode)})")}");
+        if (d["violations"] is JsonArray v) text.AppendLine("멈춘 이유: " + string.Join("; ", v.Select(x => x!.GetValue<string>())));
+        if (implBranch is not null) text.AppendLine($"브랜치: {implBranch}  (커밋 {S(d["commit"])?[..Math.Min(10, S(d["commit"])!.Length)]}, 시작 {S(d["base_commit"])?[..10]})");
+        if (S(d["diff_stat"]) is string stat) text.AppendLine($"변경: {stat} — " + string.Join(", ", (d["changed_files"] as JsonArray ?? []).Select(f => $"{S(f!["status"])} {S(f["path"])}")));
+        if (d["worker_result"] is JsonObject w)
+        {
+            var answer = w["answer"];
+            text.AppendLine($"작업자: {S(answer?["status"]) ?? S(w["status"])} — {S(answer?["summary"]) ?? S(w["error"])}");
+            foreach (var q in answer?["open_questions"] as JsonArray ?? []) text.AppendLine("  질문: " + q!.GetValue<string>());
+            if (w["denied_actions"] is JsonArray { Count: > 0 } denied) text.AppendLine("  거절된 동작: " + denied.ToJsonString());
+        }
+        foreach (var c in d["checks"] as JsonArray ?? [])
+            text.AppendLine($"확인 {(c!["passed"]!.GetValue<bool>() ? "통과" : c["timed_out"]!.GetValue<bool>() ? "시간 초과" : "실패")}: {S(c["command"])} (종료 {c["exit_code"]?.ToJsonString() ?? "-"}, {c["seconds"]}초)");
+        if (d["review"] is JsonObject r)
+            text.AppendLine($"교차 검수: {S(r["status"])}{(S(r["reason"]) is string why ? $" ({why})" : "")}{(r["violations"] is JsonArray rv ? " — " + string.Join("; ", rv.Select(x => x!.GetValue<string>())) : "")}" +
+                (r["findings"] is JsonArray fs ? $" · 지적 {fs.Count}건" : ""));
+        if (d["original_checkout_unchanged"] is JsonNode same) text.AppendLine(same.GetValue<bool>() ? "원래 작업 폴더: 그대로" : "원래 작업 폴더: 실행 중 바뀜 — 직접 확인하세요");
+        ImplSummary.Text = text.ToString();
+        implFindings = (d["review"]?["findings"] as JsonArray ?? []).Select(f => new FindingView(S(f!["reviewer"])!, S(f["kind"]) ?? "", S(f["severity"]) ?? "", S(f["location"]) ?? "",
+            S(f["claim"]) ?? "", S(f["detail"]) ?? "", S(f["quote"]) ?? "", S(f["evidence"]) ?? "")).ToList();
+        ImplFindings.ItemsSource = implFindings;
+        ImplDiff.Text = S(d["diff_path"]) is string diff && File.Exists(diff) ? File.ReadAllText(diff) : "";
+        ImplReportButton.IsEnabled = implReport is not null;SetImplActions(o.Status == "completed" && implBranch is not null);
+        if (implBranch is not null && o.Status != "completed") ImplDiscardButton.IsEnabled = true;
+    }
+    async void OnMergeImplementation(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
+    {
+        if (implRepo is null || implBranch is null) return;
+        if (MessageBox.Show(this, $"{implRepo}\n\n지금 체크아웃된 브랜치에 {implBranch}를 병합합니다(병합 커밋 생성).\n커밋 안 된 변경이 있으면 병합하지 않고, 충돌이 나면 되돌립니다.\n\n병합할까요?",
+            "병합", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        var merged = await Implementer.MergeAsync(implRepo, implBranch);
+        SetImplActions(false);Say($"{merged["into"]} 브랜치에 병합했습니다. 병합 커밋 {merged["commit"]!.GetValue<string>()[..10]}\n작업 브랜치 {implBranch}는 지웠습니다.", "병합 완료");
+        Status("병합했습니다.");implBranch = null;
+    });
+    void OnContinueImplementation(object sender, RoutedEventArgs e)
+    {
+        if (implBranch is null) return;
+        ImplContinueBranch.Text = implBranch;ImplInstructionFile.Text = "";
+        ImplInstruction.Text = implFindings.Count == 0 ? "" : "교차 검수 지적을 검토하고, 맞는 지적만 고쳐라. 틀린 지적은 고치지 말고 open_questions에 이유를 적어라.\n" +
+            string.Join("\n", implFindings.Select(f => $"- [{f.Severity}] {f.Location}: {f.Claim}"));
+        Status("같은 브랜치에 이어서 고칩니다. 추가 지시를 확인한 뒤 '확인하고 구현 시작'을 누르세요.");
+    }
+    async void OnDiscardImplementation(object sender, RoutedEventArgs e) => await GuardAsync(async () =>
+    {
+        if (implRepo is null || implBranch is null) return;
+        if (MessageBox.Show(this, $"{implBranch} 브랜치를 지웁니다. 되돌릴 수 없습니다.\n\n버릴까요?", "버리기", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        await Implementer.DiscardAsync(implRepo, implBranch);
+        if (ImplContinueBranch.Text.Trim() == implBranch) ImplContinueBranch.Text = "";
+        SetImplActions(false);Status($"{implBranch} 브랜치를 지웠습니다.");implBranch = null;
+    });
+    void OnShowImplReport(object sender, RoutedEventArgs e) => Guard(() => { if (implReport is not null) ShowText("검수 보고서 — " + implReport, File.ReadAllText(implReport)); });
+    static string ImplStatusLabel(string status) => status switch
+    {
+        "completed" => "완료 (브랜치에 커밋됨)", "no_changes" => "변경 없음", "worker_failed" => "작업자 실패", "approval_required" => "실행 안 함",
+        "failed" => "실패", "cancelled" => "취소", _ => status
+    };
+    void ShowText(string title, string text) => new Window
+    {
+        Title = title, Owner = this, Width = 900, Height = 700,
+        Content = new TextBox { Text = text, IsReadOnly = true, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
+    }.ShowDialog();
 
     // ---- History
     void RefreshRuns() => RunsGrid.ItemsSource = service.RecentRuns().Select(r => r with { Status = StatusLabel(r.Status) }).ToList();
@@ -331,6 +451,24 @@ public partial class MainWindow : Window
         "invalid_key_name" => "키 이름은 1~64자로 입력하세요",
         "invalid_credential_value" => "키 값에 공백을 넣을 수 없습니다",
         "unknown_key" => "선택한 키를 찾을 수 없습니다",
+        "not_a_repository_root" => "git 저장소의 루트 폴더가 아닙니다 (.git이 있는 폴더를 고르세요)",
+        "unsupported_instruction_file" => "지시문은 .md, .markdown, .txt 파일만 됩니다",
+        "instruction_too_large" => "지시문 파일이 너무 큽니다 (256KB 이하)",
+        "instruction_required" => "지시문 파일이나 추가 지시를 입력하세요",
+        "input_unavailable" => "파일이나 폴더를 찾을 수 없습니다",
+        "worker_must_be_cli" => "작업자는 CLI(Claude Code, Codex, Antigravity)만 됩니다",
+        "policy_violation" => "실행 조건에 맞지 않습니다",
+        "reviewer_required" => "교차 검수자를 고르세요",
+        "invalid_branch" => "이어서 고칠 브랜치는 reviewgate/impl-로 시작해야 합니다",
+        "invalid_check" => "확인 명령은 한 줄에 하나씩, 400자 이하로 입력하세요",
+        "git_failed" => "git 명령이 실패했습니다",
+        "checkout_not_clean" => "저장소에 커밋 안 된 변경이 있어 병합하지 않았습니다. 먼저 커밋하거나 정리하세요",
+        "merge_conflict" => "충돌이 나서 병합을 되돌렸습니다. 직접 병합하거나 이어서 고치기로 해결하세요",
+        "merge_failed" => "병합하지 못했습니다 (git 설정을 확인하세요)",
+        "invalid_merge_target" => "지금 체크아웃이 브랜치가 아니거나 작업 브랜치입니다",
+        "branch_not_found" => "브랜치를 찾을 수 없습니다",
+        "branch_checked_out_elsewhere" => "그 브랜치가 다른 폴더에 체크아웃되어 있습니다",
+        "state_source_overlap" => "저장소와 ReviewGate 상태 폴더가 겹칩니다",
         _ => code
     };
     void Status(string text) => StatusText.Text = text;
@@ -344,7 +482,7 @@ public partial class MainWindow : Window
     async Task GuardAsync(Func<Task> action)
     {
         try { await action(); }
-        catch (ReviewError e) { Say(Explain(e.Code), "확인 필요"); }
+        catch (ReviewError e) { Say(Explain(e.Code) + (e.Action is { } detail && detail.Contains(':') ? "\n\n" + detail : ""), "확인 필요"); }
         catch (OperationCanceledException) { Status("취소했습니다."); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Say("파일을 읽거나 쓰지 못했습니다: " + e.Message, "오류"); }
     }

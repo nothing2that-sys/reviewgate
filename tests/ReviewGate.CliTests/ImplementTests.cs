@@ -192,4 +192,56 @@ public sealed class ImplementTests
         Assert.Equal("revoked", revoked.Status);Assert.Null(store.ActiveImplementPolicy());Assert.Null(store.ActivePolicy());
         Assert.Equal("worker_must_be_cli", Assert.Throws<ReviewError>(() => Service(r.Env).DraftImplementPolicy([r.Path], [new("openai", null)], [], 10, 30)).Code);
     }
+
+    // ---- The desktop app: a person confirms the run there, so no standing policy is consulted.
+    static (Implementer Impl, FakeReviewer Reviewer) Desktop(Repo r, FakeWorker worker)
+    {
+        var reviewer = new FakeReviewer();
+        var svc = new DesktopService(r.Env.State, Profiles, new Keys(), locateCli: _ => null, cli: () => reviewer);
+        return (new Implementer(svc, r.Env.State, worker.Run), reviewer);
+    }
+    [Fact] public async Task APersonConfirmedRunNeedsNoPolicyButKeepsTheReviewerRuleAndTheCostCap()
+    {
+        using var r = new Repo();var (impl, reviewer) = Desktop(r, new FakeWorker(ToTwo));
+        var done = await impl.RunAsync(new("Change result to 2.", r.Path, new("codex-cli", null), [new("claude-cli", null)], Checks: ["findstr /c:\"result = 2\" Sample.cs"], PersonReviewMaxUsd: 1m));
+        Assert.Equal("completed", done.Status);Assert.Equal("desktop_confirm", done.Details["approved_by"]!.GetValue<string>());
+        Assert.True(done.Details["checks"]![0]!["passed"]!.GetValue<bool>());Assert.Equal("completed", done.Details["review"]!["status"]!.GetValue<string>());Assert.Single(reviewer.Sent);
+        var same = await impl.RunAsync(new("x", r.Path, new("codex-cli", null), [new("codex-cli", null)], PersonReviewMaxUsd: 1m));
+        Assert.Equal("approval_required", same.Status);Assert.StartsWith("reviewer_same_as_worker", same.Details["violations"]![0]!.GetValue<string>());
+        // A paid reviewer over the person's cap is not sent; the change itself is still kept on its branch.
+        var capped = await impl.RunAsync(new("Change result to 2.", r.Path, new("codex-cli", null), [new("openai", null)], UseFallbacks: false, PersonReviewMaxUsd: 0m));
+        Assert.Equal("completed", capped.Status);Assert.Equal("approval_required", capped.Details["review"]!["status"]!.GetValue<string>());
+        Assert.StartsWith("over_review_cap", capped.Details["review"]!["violations"]![0]!.GetValue<string>());
+    }
+    [Fact] public void TheInstructionComesFromAMarkdownOrTextFilePlusExtraText()
+    {
+        using var r = new Repo();string md = Path.Combine(r.Env.Root, "task.md"), cs = Path.Combine(r.Env.Root, "task.cs");
+        File.WriteAllText(md, "# 작업\nadd를 고쳐라.\n", Data.Utf8);File.WriteAllText(cs, "x");
+        Assert.Equal("## 지시문 (task.md)\n# 작업\nadd를 고쳐라.\n\n## 추가 지시\n테스트는 바꾸지 마라.", Implementer.ComposeInstruction(md, " 테스트는 바꾸지 마라. "));
+        Assert.Equal("직접 입력한 지시", Implementer.ComposeInstruction("", "직접 입력한 지시"));
+        Assert.Equal("unsupported_instruction_file", Assert.Throws<ReviewError>(() => Implementer.ComposeInstruction(cs, null)).Code);
+        Assert.Equal("instruction_required", Assert.Throws<ReviewError>(() => Implementer.ComposeInstruction(null, "  ")).Code);
+        Assert.Equal("input_unavailable", Assert.Throws<ReviewError>(() => Implementer.ComposeInstruction(md + ".missing.md", null)).Code);
+    }
+    [Fact] public async Task MergeNeedsACleanCheckoutAndAConflictLeavesItAsItWas()
+    {
+        using var r = new Repo();var (impl, _) = Desktop(r, new FakeWorker(ToTwo));
+        var first = await impl.RunAsync(new("Change result to 2.", r.Path, new("codex-cli", null), [], NoReview: true, PersonReviewMaxUsd: 0m));
+        string branch = first.Details["branch"]!.GetValue<string>();
+        // Uncommitted tracked change: refused, nothing touched.
+        File.WriteAllText(Path.Combine(r.Path, "Sample.cs"), "int result = 9;\n");
+        Assert.Equal("checkout_not_clean", (await Assert.ThrowsAsync<ReviewError>(() => impl.MergeAsync(r.Path, branch))).Code);
+        r.Git("checkout", "--", "Sample.cs");
+        var merged = await impl.MergeAsync(r.Path, branch);
+        Assert.Equal("main", merged["into"]!.GetValue<string>());Assert.Equal("int result = 2;\n", File.ReadAllText(Path.Combine(r.Path, "Sample.cs")).Replace("\r\n", "\n"));
+        Assert.DoesNotContain("reviewgate/", r.Git("branch", "--list"));
+        // A conflicting change is aborted: main keeps its commit and the branch stays for another try.
+        var (toThree, _) = Desktop(r, new FakeWorker(f => File.WriteAllText(Path.Combine(f, "Sample.cs"), "int result = 3;\n")));
+        var second = await toThree.RunAsync(new("Change result to 3.", r.Path, new("codex-cli", null), [], NoReview: true, PersonReviewMaxUsd: 0m));
+        string conflicting = second.Details["branch"]!.GetValue<string>();
+        File.WriteAllText(Path.Combine(r.Path, "Sample.cs"), "int result = 4;\n");r.Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "main moves");
+        string head = r.Git("rev-parse", "HEAD").Trim();
+        Assert.Equal("merge_conflict", (await Assert.ThrowsAsync<ReviewError>(() => impl.MergeAsync(r.Path, conflicting))).Code);
+        Assert.Equal(head, r.Git("rev-parse", "HEAD").Trim());Assert.Equal("", r.Git("status", "--porcelain"));Assert.Contains(conflicting, r.Git("branch", "--list"));
+    }
 }
