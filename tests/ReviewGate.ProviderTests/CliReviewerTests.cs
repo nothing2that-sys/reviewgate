@@ -66,7 +66,52 @@ public sealed class CliReviewerTests
         var plan = Planner.Build(store, new("cli", e.Source, e.Source, "nonsensitive", "Review supplied source", Path.Combine(Profiles, "code.json"), [ReviewerFile("claude-cli")], Path.Combine(Profiles, "budget-live.json"), Path.Combine(Profiles, "prices", "live-2026-11-04.json"), null, ["Sample.cs"], []));
         var body = JsonNode.Parse(Assert.Single(plan.Requests).Body)!;
         Assert.Equal("claude-cli", body["cli"]!.GetValue<string>());Assert.Null(body["model"]);Assert.NotNull(body["schema"]);Assert.Contains("Sample.cs", body["prompt"]!.GetValue<string>());
+        // The CLI runs in the reviewed folder and is told it may read around but not change anything.
+        Assert.Equal(plan.SourceRoot, body["workdir"]!.GetValue<string>());Assert.Equal(WireAdapters.CliSystemInstruction, body["system"]!.GetValue<string>());
         Assert.Equal(0m, plan.Requests[0].ReservationUsd);
+    }
+
+    // Captures the command line instead of starting the CLI; returning no process ends the send with cli_start_failed.
+    static async Task<System.Diagnostics.ProcessStartInfo> CommandLine(string provider, string? workdir)
+    {
+        System.Diagnostics.ProcessStartInfo? seen = null;string? requestText = null;
+        var transport = new CliTransport(exe => @"C:ake\" + exe, psi =>
+        {
+            seen = psi;
+            string temp = psi.ArgumentList.Contains("-o") ? Path.GetDirectoryName(psi.ArgumentList[psi.ArgumentList.IndexOf("-o") + 1])! : psi.WorkingDirectory;
+            if (File.Exists(Path.Combine(temp, "review-request.md"))) requestText = File.ReadAllText(Path.Combine(temp, "review-request.md"));
+            return null;
+        });
+        string body = new JsonObject { ["cli"] = provider, ["model"] = null, ["workdir"] = workdir, ["system"] = "SYSTEM", ["prompt"] = "PROMPT", ["schema"] = new JsonObject { ["type"] = "object" } }.ToJsonString();
+        Assert.Equal("cli_start_failed", (await Assert.ThrowsAsync<ReviewError>(() => transport.SendAsync(Shipped(provider), body, CancellationToken.None))).Code);
+        return seen!;
+    }
+    [Fact] public async Task CliRunsInTheProjectFolderAndKeepsItsOwnFilesInTemp()
+    {
+        using var e = new TestEnvironment();string project = e.Source, temp = Path.Combine(Path.GetTempPath(), "ReviewGate-cli");
+        var before = Directory.GetFileSystemEntries(project, "*", SearchOption.AllDirectories).Order().ToList();
+
+        var claude = await CommandLine("claude-cli", project);
+        Assert.Equal(project, claude.WorkingDirectory);Assert.Equal(CliTransport.ReadOnlyTools, claude.ArgumentList[claude.ArgumentList.IndexOf("--tools") + 1]);
+        var codex = await CommandLine("codex-cli", project);
+        Assert.Equal(project, codex.WorkingDirectory);Assert.Equal(project, codex.ArgumentList[codex.ArgumentList.IndexOf("-C") + 1]);
+        Assert.StartsWith(temp, codex.ArgumentList[codex.ArgumentList.IndexOf("-o") + 1]);Assert.StartsWith(temp, codex.ArgumentList[codex.ArgumentList.IndexOf("--output-schema") + 1]);
+        var agy = await CommandLine("agy-cli", project);
+        string added = agy.ArgumentList[agy.ArgumentList.IndexOf("--add-dir") + 1];
+        Assert.Equal(project, agy.WorkingDirectory);Assert.StartsWith(temp, added);Assert.Contains(Path.Combine(added, "review-request.md"), agy.ArgumentList[0]);
+        // Nothing was written into the project, and every temp folder is gone.
+        Assert.Equal(before, Directory.GetFileSystemEntries(project, "*", SearchOption.AllDirectories).Order().ToList());
+        Assert.False(Directory.Exists(added));Assert.False(Directory.Exists(Path.GetDirectoryName(codex.ArgumentList[codex.ArgumentList.IndexOf("-o") + 1])));
+    }
+    [Fact] public async Task WithoutAProjectFolderTheCliRunsInAnEmptyTempFolderWithNoTools()
+    {
+        string temp = Path.Combine(Path.GetTempPath(), "ReviewGate-cli");
+        var claude = await CommandLine("claude-cli", null);
+        Assert.StartsWith(temp, claude.WorkingDirectory);Assert.Equal("", claude.ArgumentList[claude.ArgumentList.IndexOf("--tools") + 1]);
+        var gone = await CommandLine("codex-cli", Path.Combine(temp, "missing-" + Guid.NewGuid().ToString("N")));
+        Assert.StartsWith(temp, gone.WorkingDirectory);Assert.Equal(gone.WorkingDirectory, gone.ArgumentList[gone.ArgumentList.IndexOf("-C") + 1]);
+        var agy = await CommandLine("agy-cli", null);Assert.DoesNotContain("--add-dir", agy.ArgumentList);
+        Assert.False(Directory.Exists(claude.WorkingDirectory));
     }
 
     sealed class FakeCli(Func<ReviewerProfile, TransportResult> answer) : IModelTransport

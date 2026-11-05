@@ -95,13 +95,13 @@ public static class Planner
                         text=Data.Utf8.GetString(File.ReadAllBytes(sources.Single(s=>s.Id==span.SourceId).TextPath).AsSpan(span.Start,span.End-span.Start))}).ToList();
                     string payload=Data.Json(new{execution_mode=store.Namespace,instruction=input.Instruction,criterion,core=new{source_id=chunk.SourceId,start_byte=chunk.Start,end_byte=chunk.End},sources=context,
                         verification_target=input.Mode=="verify"?selectedFindings:null});
-                    string body=WireAdapters.Build(reviewer,payload);string unit=Data.Hash(reviewer.Id+"\n"+criterion.Id+"\n"+chunk.Id);
+                    string body=WireAdapters.Build(reviewer,payload,repo??root);string unit=Data.Hash(reviewer.Id+"\n"+criterion.Id+"\n"+chunk.Id);
                     var request=new RequestPlan(Data.Id("request"),unit,reviewer.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,body,Data.Hash(body),WireAdapters.Reservation(reviewer,price,body),criterion.Scope);
                     if(!live)_=SelectFixture(p,request);p.Requests.Add(request);
                     if(fallback is not null)
                     {
                         // Same payload, other model: the fallback sees exactly what the primary would have seen.
-                        string fallbackBody=WireAdapters.Build(fallback,payload);
+                        string fallbackBody=WireAdapters.Build(fallback,payload,repo??root);
                         var alternate=new RequestPlan(Data.Id("request"),Data.Hash(fallback.Id+"\n"+criterion.Id+"\n"+chunk.Id),fallback.Id,criterion.Id,chunk.SourceId,chunk.Index,spans,fallbackBody,Data.Hash(fallbackBody),WireAdapters.Reservation(fallback,fallbackPrice!,fallbackBody),criterion.Scope,request.Id);
                         if(!live)_=SelectFixture(p,alternate);p.Requests.Add(alternate);
                     }

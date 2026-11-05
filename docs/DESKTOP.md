@@ -39,14 +39,17 @@ API 검수자와 같은 계획·grant·장부·근거 검사를 거치며, API �
 
 | 제공자 id | 실행 파일 | 호출 방식 |
 |---|---|---|
-| `claude-cli` | `claude.exe` | `-p --output-format json --json-schema <스키마> --tools "" --no-session-persistence --system-prompt <지시>`, 본문은 표준 입력 |
-| `codex-cli` | `codex.exe` | `exec - --skip-git-repo-check --ephemeral --json --output-schema schema.json -o last-message.json`, 지시+본문은 표준 입력 |
-| `agy-cli` | `agy.exe` | 표준 입력을 읽지 않으므로 요청을 `review-request.md`에 쓰고 `-p=<그 파일을 읽으라는 지시> --output-format json --json-schema schema.json` |
+| `claude-cli` | `claude.exe` | `-p --output-format json --json-schema <스키마> --tools Read,Grep,Glob --no-session-persistence --system-prompt <지시>`, 본문은 표준 입력 |
+| `codex-cli` | `codex.exe` | `exec - -C <프로젝트 폴더> --skip-git-repo-check --ephemeral --json --output-schema <임시>\schema.json -o <임시>\last-message.json`, 지시+본문은 표준 입력 |
+| `agy-cli` | `agy.exe` | 표준 입력을 읽지 않으므로 요청을 `<임시>\review-request.md`에 쓰고 `-p=<그 파일을 읽으라는 지시> --output-format json --json-schema <임시>\schema.json --add-dir <임시>` |
 
 - 각 CLI의 **로그인한 구독 계정**으로 처리됩니다. 키는 필요 없고, 데이터 학습·보관은 그 계정 설정을 따릅니다. 전송 승인 창에 이 경고가 함께 표시됩니다.
 - 가격표에는 단가 0, tier `subscription`으로 들어 있습니다. 예약 상한은 0이고, 장부에는 CLI가 보고한 토큰 수만 남습니다(구독 사용량은 각 서비스에서 확인).
 - 실행 파일은 PATH와 표준 설치 폴더(`~\.local\bin`, `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, `%LOCALAPPDATA%\agy\bin`)에서 `.exe`만 찾습니다. `.cmd`/`.ps1` 래퍼는 쓰지 않습니다.
-- 사용자 결정에 따라 **샌드박스 없이** 요청마다 새 임시 폴더(`%TEMP%\ReviewGate-cli\<guid>`)에서 실행하고, 끝나면 폴더를 지웁니다. Claude Code는 도구를 모두 끈 상태(`--tools ""`)로 실행합니다. Codex·Antigravity는 도구 사용을 막는 옵션을 주지 않습니다.
+- CLI는 **검수 대상 폴더**(저장소 루트를 지정했으면 그 루트, 아니면 소스 루트)에서 실행되어 주변 파일을 참고할 수 있습니다. 이 폴더는 계획에 고정되며 전송 승인 전에 정해집니다. 붙여 넣은 텍스트(연결 테스트 포함)는 원래 임시 폴더(`%TEMP%\ReviewGate-quick`)가 소스 루트이므로 그곳에서 실행됩니다.
+- ReviewGate가 CLI에 넘기는 파일(스키마, agy 요청문, Codex 마지막 메시지)은 프로젝트에 쓰지 않고 요청마다 새 임시 폴더(`%TEMP%\ReviewGate-cli\<guid>`)에 두며, 끝나면 지웁니다. 계획의 폴더가 사라졌으면 그 빈 임시 폴더에서 실행합니다.
+- 프로젝트 폴더에서 실행할 때 지시문은 "주변 파일은 읽기만, 파일 수정·생성·삭제나 상태를 바꾸는 명령 금지, 지적은 제공된 소스만 인용"입니다. 근거 검사는 그대로라서 제공된 소스 밖의 파일을 인용한 지적은 인용 확인에 실패합니다.
+- 사용자 결정에 따라 **샌드박스 없이** 실행합니다. Claude Code는 읽기 도구(`Read,Grep,Glob`)만 켜고(프로젝트 폴더가 없으면 도구 없음), Codex·Antigravity는 도구 제한 옵션을 주지 않으므로 각 CLI의 자체 설정·권한 정책과 위 지시문에 맡깁니다.
 - 모델은 각 CLI의 기본 모델입니다(`model_id`가 `default:`로 시작하면 모델 인자를 넘기지 않음). 그래서 같은 모델 판정은 `canonical_model_key` 기준이며, CLI 기본 모델과 같은 API 모델을 함께 고르면 걸러지지 않을 수 있습니다.
 - 시간 제한(기본 900초)을 넘기거나 사용자가 취소하면 프로세스 트리를 종료합니다. 출력 8MB 초과, 해석할 수 없는 출력은 "응답 미확인"으로 남습니다(CLI가 이미 모델을 호출했을 수 있음). 단가 0이므로 0원으로 자동 정산됩니다.
 - 스키마를 따르지 않은 답(예: 성공이지만 `structured_output`이 없음)은 빈 검수로 치지 않고 형식 오류로 처리합니다.

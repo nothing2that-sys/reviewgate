@@ -7,14 +7,17 @@ using ReviewGate.Contracts;
 namespace ReviewGate.Transport.Cli;
 
 // Runs an installed agent CLI (Claude Code, Codex, Antigravity) headless as a reviewer, with its own login.
-// This is the only place in the product that starts a process. Each request runs in a new empty temp folder,
-// gets the pinned request text and schema, and the CLI's answer is normalized to one shape:
+// This is the only place in the product that starts a process. The CLI runs in the project folder named by the
+// request ("workdir": repository root or source root), so it can read surrounding files; ReviewGate's own files
+// (schema, request text, last message) go to a separate temp folder and never into the project. A request without
+// a workdir (or whose folder is gone) runs in that empty temp folder. The answer is normalized to one shape:
 //   {cli, status: completed|failed, error, structured_output, usage{input,cached_input,output,thinking}, model, estimated_cost_usd, exit_code}
-// No sandbox is imposed (by the user's choice); Claude Code still runs with its tools turned off, since a review needs none.
+// No sandbox is imposed (by the user's choice). Claude Code gets read-only tools in a project and none otherwise.
 public sealed class CliTransport(Func<string, string?>? locate = null, Func<ProcessStartInfo, Process?>? start = null) : IModelTransport
 {
     public const int MaxOutputBytes = 8 * 1024 * 1024;
-    public const string AgyInstruction = "Read review-request.md in the current directory and do exactly what it says. Use no other files, commands or web access. Answer only with JSON matching the schema.";
+    public const string ReadOnlyTools = "Read,Grep,Glob";
+    public static string AgyInstruction(string requestFile) => $"Read the review request in \"{requestFile}\" and do exactly what it says. Do not modify any file, run commands that change anything, or use the web. Answer only with JSON matching the schema.";
     readonly Func<string, string?> locate = locate ?? DefaultLocate;
     readonly Func<ProcessStartInfo, Process?> start = start ?? Process.Start;
 
@@ -40,7 +43,8 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
         string executable = locate(info.Endpoint) ?? throw new ReviewError(11, "cli_not_found");
         var request = JsonNode.Parse(body)!.AsObject();
         string system = request["system"]!.GetValue<string>(), prompt = request["prompt"]!.GetValue<string>(), schema = request["schema"]!.ToJsonString();
-        string? model = request["model"]?.GetValue<string>();
+        string? model = request["model"]?.GetValue<string>(), project = request["workdir"]?.GetValue<string>();
+        if (project is not null && !Directory.Exists(project)) project = null;
         string work = Path.Combine(Path.GetTempPath(), "ReviewGate-cli", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
         try
@@ -49,7 +53,7 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             await File.WriteAllTextAsync(schemaFile, schema, Data.Utf8, cancellation);
             var psi = new ProcessStartInfo(executable)
             {
-                WorkingDirectory = work, UseShellExecute = false, CreateNoWindow = true,
+                WorkingDirectory = project ?? work, UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardInputEncoding = Data.Utf8, StandardOutputEncoding = Data.Utf8, StandardErrorEncoding = Data.Utf8
             };
@@ -57,19 +61,22 @@ public sealed class CliTransport(Func<string, string?>? locate = null, Func<Proc
             switch (info.Id)
             {
                 case "claude-cli":
-                    foreach (var a in new[] { "-p", "--output-format", "json", "--json-schema", schema, "--tools", "", "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
+                    foreach (var a in new[] { "-p", "--output-format", "json", "--json-schema", schema, "--tools", project is null ? "" : ReadOnlyTools, "--no-session-persistence", "--system-prompt", system }) psi.ArgumentList.Add(a);
                     if (model is not null) { psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(model); }
                     stdin = prompt;
                     break;
                 case "codex-cli":
-                    foreach (var a in new[] { "exec", "-", "--skip-git-repo-check", "--ephemeral", "--json", "--output-schema", schemaFile, "-o", outFile }) psi.ArgumentList.Add(a);
+                    foreach (var a in new[] { "exec", "-", "-C", project ?? work, "--skip-git-repo-check", "--ephemeral", "--json", "--output-schema", schemaFile, "-o", outFile }) psi.ArgumentList.Add(a);
                     if (model is not null) { psi.ArgumentList.Add("-m"); psi.ArgumentList.Add(model); }
                     stdin = system + "\n\n" + prompt;
                     break;
                 case "agy-cli":
-                    // agy takes the prompt only as an argument (32K command-line limit), so the request goes in a file it reads.
-                    await File.WriteAllTextAsync(Path.Combine(work, "review-request.md"), system + "\n\n" + prompt, Data.Utf8, cancellation);
-                    foreach (var a in new[] { "-p=" + AgyInstruction, "--output-format", "json", "--json-schema", schemaFile }) psi.ArgumentList.Add(a);
+                    // agy takes the prompt only as an argument (32K command-line limit), so the request goes in a temp file
+                    // it reads; in a project the temp folder is added to its workspace next to the project.
+                    string requestFile = Path.Combine(work, "review-request.md");
+                    await File.WriteAllTextAsync(requestFile, system + "\n\n" + prompt, Data.Utf8, cancellation);
+                    foreach (var a in new[] { "-p=" + AgyInstruction(requestFile), "--output-format", "json", "--json-schema", schemaFile }) psi.ArgumentList.Add(a);
+                    if (project is not null) { psi.ArgumentList.Add("--add-dir"); psi.ArgumentList.Add(work); }
                     if (model is not null) { psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(model); }
                     break;
                 default: throw new ReviewError(14, "unsupported_capability");
