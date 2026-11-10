@@ -1,0 +1,4 @@
+# These test fixtures are verified against hashes of their LF bytes.
+tests/fixtures/provider-specs/** text eol=lf
+tests/fixtures/hglos/findings-schema.json text eol=lf
+tests/fixtures/hglos/validate_findings.py text eol=lf

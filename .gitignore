@@ -9,3 +9,11 @@ TestResults/
 .env*
 **/state.db*
 **/*.lock
+
+# Local profiles, caches and credentials
+data/
+credentials/
+.env
+.env.*
+.sites-runtime/
+.claude/
