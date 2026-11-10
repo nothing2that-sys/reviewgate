@@ -26,7 +26,7 @@ public sealed class StateTests
     [Fact] public void UnknownCarriesIntoNewMonthAcrossProjects()
     {
         using var e=new TestEnvironment();DateTimeOffset clock=new(2026,11,30,14,59,0,TimeSpan.Zero);
-        e.Put("prices.json",new PriceSnapshot(Data.Version,"test",clock,clock.AddDays(-1),clock.AddDays(2),"synthetic",Data.Hash("test"),[new("fixture/a",100,100)]));e.Put("budget.json",new BudgetPolicy(Data.Version,1,1,.6m));
+        e.Put("prices.json",new PriceSnapshot(Data.Version,"test",clock,clock.AddDays(-1),clock.AddDays(2),"synthetic",Data.Hash("test"),[new("fixture/a",100,100)]));e.Put("budget.json",new BudgetPolicy(Data.Version,1,1,1m));
         using var s=new ReviewGate.Infrastructure.StateStore(e.State,()=>clock);var p=e.MakePlan(s);var r=s.NewRun(p);var a=s.Reserve(r,p,p.Requests[0],e.Grant(p)with{ExpiresAt=clock.AddHours(1)});s.Dispatch(a.Id);s.Unknown(a.Id,"unknown");clock=clock.AddMinutes(2);
         var p2=e.MakePlan(s,project:"other");Assert.Equal("2026-12",ReviewGate.Infrastructure.StateStore.Month(clock));Assert.Equal(12,Assert.Throws<ReviewError>(()=>s.Reserve(s.NewRun(p2),p2,p2.Requests[0],e.Grant(p2)with{ExpiresAt=clock.AddHours(1)})).ExitCode);
     }

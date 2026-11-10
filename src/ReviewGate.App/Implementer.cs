@@ -316,7 +316,7 @@ public sealed class Implementer(DesktopService service, string stateRoot, Worker
                 ["unit_notes"] = Arr(result.UnitNotes), ["attempts"] = WithRequestHash(result.Attempts, q.RequestSha256),
                 ["findings"] = new JsonArray([.. result.Findings.Select(f => (JsonNode)new JsonObject
                 {
-                    ["reviewer"] = f.Reviewer, ["kind"] = f.Kind, ["severity"] = f.Severity, ["location"] = f.Location, ["claim"] = f.Claim, ["detail"] = f.Detail, ["quote"] = f.Quote, ["evidence"] = f.Evidence
+                    ["reviewer"] = f.Reviewer, ["kind"] = f.Kind, ["severity"] = f.Severity, ["location"] = f.Location, ["claim"] = f.Claim, ["detail"] = f.Detail, ["quote"] = f.Quote, ["evidence"] = f.Evidence, ["found_by"] = new JsonArray([.. (f.FoundBy ?? []).Select(r => (JsonNode)r)])
                 })])
             };
         }

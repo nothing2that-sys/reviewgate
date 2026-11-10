@@ -24,7 +24,8 @@ static class Headless
         Data.Require(picks.All(p => p.Model != "*"), "reviewer_model_wildcard_not_allowed");
         var (instruction, requestSha256) = await CliHost.InstructionWithHashAsync(o, ct);
         string kind = o.One("profile") ?? "code";
-        var preview = svc.PrepareReview(new(picks, instruction, o.Need("source-root"), o.Many("input"), o.Many("reference"), o.One("repository-root"), kind, !o.Has("no-fallback"), o.One("project")));
+        int minVendors = o.One("min-vendors") is string mv ? int.TryParse(mv, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n is >= 1 and <= 2 ? n : throw new ReviewError(2, "invalid_min_vendors") : 0;
+        var preview = svc.PrepareReview(new(picks, instruction, o.Need("source-root"), o.Many("input"), o.Many("reference"), o.One("repository-root"), kind, !o.Has("no-fallback"), o.One("project"), minVendors));
         var plan = new JsonObject
         {
             ["recipients"] = new JsonArray([.. preview.Recipients.Select(r => (JsonNode)r)]), ["warnings"] = new JsonArray([.. preview.Warnings.Select(w => (JsonNode)w)]),
@@ -53,7 +54,7 @@ static class Headless
                 ["findings"] = new JsonArray([.. result.Findings.Select(f => (JsonNode)new JsonObject
                 {
                     ["reviewer"] = f.Reviewer, ["kind"] = f.Kind, ["severity"] = f.Severity, ["location"] = f.Location, ["claim"] = f.Claim, ["detail"] = f.Detail,
-                    ["quote"] = f.Quote, ["evidence"] = f.Evidence
+                    ["quote"] = f.Quote, ["evidence"] = f.Evidence, ["found_by"] = new JsonArray([.. (f.FoundBy ?? []).Select(r => (JsonNode)r)])
                 })]),
                 ["request_sha256"] = requestSha256, ["attempts"] = ReviewGate.App.Implementer.WithRequestHash(result.Attempts, requestSha256)
             }

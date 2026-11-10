@@ -87,6 +87,8 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         if(attempts.Any(a=>a.Phase=="unknown")){status="needs_reconciliation";exit=13;error="reconciliation_required";}
         else if(exit==130)status="cancelled";
         else if(exit is 10 or 11 or 12)status=coverage.ValidUnits>0?"partial":"blocked";
+        // Full coverage still falls short when fewer distinct model developers answered than the plan requires.
+        else if(coverage.RequiredCoverageComplete&&exit==0&&p.MinVendors>0&&AnsweringDevelopers(p,store.Units(run.Id)).Count<p.MinVendors){status="partial";exit=20;error="too_few_vendors";}
         else if(coverage.RequiredCoverageComplete&&exit==0)status="completed";
         else{status=coverage.ValidUnits>0?"partial":"failed";if(exit==0)exit=coverage.ValidUnits>0?20:21;error??="partial_review";}
         var envelope=SaveReport(p,store.GetRun(run.Id) with{Status=status,ErrorCode=error},command);
@@ -210,7 +212,9 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
             // A model that reports "error" in a valid payload is an unusable unit, not a provider failure that stops the pass.
             string? code=valid?null:response.Status=="success"?response.Disposition:response.Status==WireAdapters.InvalidPayload?"invalid_reviewer_payload":
                 response.Status=="error"&&saved.HttpStatus<400?"model_reported_error":response.Status;
-            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw",Transport(p),validation,response.Disposition,valid,CoreBytes(p,req),findings,code);
+            bool gap=response.GapReason!="none";
+            unit=new(req.UnitId,req.Id,req.ReviewerId,req.CriterionId,req.SourceId,req.Stage,"raw",Transport(p),validation,response.Disposition,valid,CoreBytes(p,req),findings,code,
+                gap?response.GapReason:null,gap&&response.GapDetail.Length>0?response.GapDetail:null);
         }
         catch(ReviewError e){unit=Invalid(p,req,e.Code);}
         if(!response.Usage.Known){store.Uncertain(a,unit,"cost_unknown");return;}
@@ -278,6 +282,38 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
         return new(primaries.Count,valid.Count,total,done,live?null:ratio,live?ratio:null,valid.Count==primaries.Count,primaries.Where(q=>!validIds.Contains(q.Id)).Select(q=>q.UnitId).ToList(),pairs,empty);
     }
     bool HasValidUnits(Plan p,RunRow run)=>CoverageFor(p,store.Units(run.Id)).ValidUnits>0;
+    // Developers (model makers) whose reviewers gave a valid answer; "unknown" never counts as a distinct developer.
+    public static List<string> AnsweringDevelopers(Plan p,IReadOnlyList<UnitResult> units)=>units.Where(u=>u.Valid)
+        .Select(u=>Developer(p,u.ReviewerId)).Where(d=>d!="unknown").Distinct().Order(StringComparer.Ordinal).ToList();
+    static string Developer(Plan p,string reviewerId)=>p.Reviewers.SingleOrDefault(r=>r.Id==reviewerId)?.ModelDeveloper.Trim().ToLowerInvariant() is {Length:>0} d?d:"unknown";
+    static readonly string[] SeverityOrder=["critical","high","medium","low","style"];
+    // Quote-verified findings whose byte ranges overlap in the same source, across reviewers and criteria, form one group
+    // (connected through any overlap). found_by counts distinct reviewers. Unverified quotes are never grouped.
+    public static List<FindingGroup> GroupFindings(Plan p,IReadOnlyList<Finding> findings)
+    {
+        var groups=new List<FindingGroup>();
+        foreach(var bySource in findings.Where(f=>f.QuoteValid).GroupBy(f=>f.SourceId).OrderBy(g=>g.Key,StringComparer.Ordinal))
+        {
+            var current=new List<Finding>();int end=-1;
+            void Flush()
+            {
+                if(current.Count==0)return;
+                var reviewers=current.Select(f=>f.ReviewerId).Distinct().Order(StringComparer.Ordinal).ToList();
+                var ids=current.Select(f=>f.Id).Order(StringComparer.Ordinal).ToList();
+                groups.Add(new("group_"+Data.Hash(string.Join("\n",ids))[..24],current[0].SourceId,current[0].Path,current.Min(f=>f.Line),current.Min(f=>f.StartByte),current.Max(f=>f.EndByte),ids,
+                    reviewers,reviewers.Select(id=>Developer(p,id)).Distinct().Order(StringComparer.Ordinal).ToList(),reviewers.Count,
+                    SeverityOrder.FirstOrDefault(sv=>current.Any(f=>f.Severity==sv))??current[0].Severity,current.Select(f=>f.CriterionId).Distinct().Order(StringComparer.Ordinal).ToList()));
+                current=[];
+            }
+            foreach(var f in bySource.OrderBy(f=>f.StartByte).ThenBy(f=>f.Id,StringComparer.Ordinal))
+            {
+                if(current.Count>0&&f.StartByte>=end)Flush();
+                current.Add(f);end=Math.Max(end,f.EndByte);
+            }
+            Flush();
+        }
+        return groups;
+    }
     public Envelope View(string runId,string command="status")
     {
         var r=store.GetRun(runId);var p=store.GetPlan(r.PlanId);var artifacts=store.Artifacts(runId);
@@ -288,21 +324,31 @@ public sealed class ReviewEngine(StateStore store,IModelTransport? live=null)
     Envelope SaveReport(Plan p,RunRow r,string command)
     {
         var units=store.Units(r.Id);var findings=LinkFindings(units.SelectMany(u=>u.Findings).ToList());var coverage=CoverageFor(p,units);
+        var groups=GroupFindings(p,findings);var groupOf=groups.SelectMany(g=>g.FindingIds.Select(id=>(id,g))).ToDictionary(x=>x.id,x=>x.g);
+        var gaps=units.Where(u=>u.GapReason is not null).OrderBy(u=>u.UnitId,StringComparer.Ordinal).Select(u=>new{unit_id=u.UnitId,reviewer_id=u.ReviewerId,criterion_id=u.CriterionId,source_id=u.SourceId,
+            chunk=p.Requests.SingleOrDefault(q=>q.Id==u.RequestId)?.ChunkIndex,disposition=u.ReviewDisposition,reason=u.GapReason!,detail=u.GapDetail}).ToList();
+        var answering=AnsweringDevelopers(p,units);
+        var vendors=new{required=p.MinVendors,planned=p.Reviewers.Where(r=>!p.Fallbacks.ContainsValue(r.Id)).Select(r=>Developer(p,r.Id)).Distinct().Order(StringComparer.Ordinal).ToList(),
+            answered=answering,met=p.MinVendors==0||answering.Count>=p.MinVendors};
         var comparisons=p.Requests.GroupBy(q=>(q.SourceId,q.ChunkIndex,q.CriterionId,q.Stage)).Select(g=>new{source_id=g.Key.SourceId,chunk=g.Key.ChunkIndex,criterion_id=g.Key.CriterionId,
             reviewers=g.Select(q=>new{reviewer_id=q.ReviewerId,result=units.SingleOrDefault(u=>u.UnitId==q.UnitId)}).ToList()}).ToList();
         string markdown=(p.ExecutionMode=="live"
             ?"# ReviewGate review (live models)\n\nFindings come from real model output checked against the pinned snapshot. Quote and location checks do not prove the claims; this is not an HGLOS round.\n\n"
             :"# ReviewGate synthetic review\n\nThis is fixture processing, not actual model review or an HGLOS round.\n\n")+Data.Json(coverage)+"\n\n";
+        if(p.MinVendors>0)markdown+=$"Model developers answering: {answering.Count}, at least {p.MinVendors} required ({Md(string.Join(", ",answering))}).\n\n";
+        if(groups.Any(g=>g.FoundBy>1))markdown+="Found by: reviewers whose verified quotes overlap the same place. Agreement is a signal to weigh, not proof that the claims are right.\n\n";
+        foreach(var g in gaps)markdown+=$"Not fully reviewed: {Md(g.reviewer_id)} on {Md(p.Sources.Single(s=>s.Id==g.source_id).LogicalPath)} ({Md(g.criterion_id)}): {Md(g.reason)}{(g.detail is null?"":", "+Md(g.detail))}\n\n";
         // Model-authored text is escaped so it cannot add links, HTML or headings to the report.
         foreach(var f in findings)
         {
             string evidence=!f.QuoteValid?" · quote not found in the pinned source (not verified)":!f.LocationValid?" · reported line/offset disagrees with the quote":"";
             string location=f.CoordinateSystem=="diff"?$"{Md(f.Path)} diff display line {f.Line} (before {f.DiffBeforeLine?.ToString(CultureInfo.InvariantCulture)??"-"}, after {f.DiffAfterLine?.ToString(CultureInfo.InvariantCulture)??"-"})":$"{Md(f.Path)}:{f.Line}";
             string fence=new('`',Math.Max(3,Regex.Matches(f.Quote,"`+").Select(m=>m.Length+1).DefaultIfEmpty(0).Max()));
-            markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}{evidence}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
+            string foundBy=groupOf.TryGetValue(f.Id,out var fg)&&fg.FoundBy>1?$" · found by {fg.FoundBy} reviewers ({Md(string.Join(", ",fg.Reviewers))})":"";
+            markdown+=$"## {Md(f.Id)}: {Md(f.Claim)}\n\n{location} · {Md(f.Severity)} · {Md(f.ExportedEvidenceGrade)}{evidence}{foundBy}\n\n{Md(f.Detail)}\n\n{fence}text\n{f.Quote}\n{fence}\n\nSuggestion: {Md(f.Suggestion)}\n\n";
         }
         string dir=store.PathFor("runs",r.Id,"bundles",Data.Id("bundle"));
-        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode=p.ExecutionMode,run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
+        var files=new Dictionary<string,string>{["result.json"]=Data.Json(new{schema_version=Data.Version,execution_mode=p.ExecutionMode,run_id=r.Id,plan_id=p.Id,plan_hash=p.Hash,run_status=r.Status,coverage,findings,finding_groups=groups,assessment_gaps=gaps,vendors,units,comparisons,independence=HglosExporter.Independence(p),cost=store.Costs(r.Id),attempts=store.Attempts(r.Id).Select(a=>a with{ResponsePath=a.ResponsePath is null?null:Path.GetRelativePath(store.Root,a.ResponsePath).Replace('\\','/')}),stale_sources=p.Sources.Where(s=>!File.Exists(s.OriginalPath)||Data.FileHash(s.OriginalPath)!=s.RawSha256).Select(s=>s.Id)}),["report.md"]=markdown};
         var artifacts=BundleWriter.Write(store.Root,dir,files,p.ExecutionMode);BundleWriter.Verify(store.Root,artifacts);Checkpoint("bundle_precommit");store.CompleteBundle(r.Id,r.Status,r.ErrorCode,artifacts);
         return View(r.Id,command);
     }

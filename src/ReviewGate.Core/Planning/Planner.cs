@@ -8,7 +8,7 @@ namespace ReviewGate.Core.Planning;
 
 public record PlanInput(string Project,string SourceRoot,string? RepositoryRoot,string InputClass,
     string Instruction,string ProfileFile,List<string> ReviewerFiles,string BudgetFile,string PriceFile,
-    string? FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null,List<string?>? FallbackReviewerFiles=null);
+    string? FixtureFile,List<string> Inputs,List<string> References,string Mode="single",string? BaseRun=null,List<string>? Findings=null,List<string?>? FallbackReviewerFiles=null,int MinVendors=0);
 public static class Planner
 {
     public static Plan Build(StateStore store,PlanInput input)
@@ -76,7 +76,11 @@ public static class Planner
             Data.CreateFile(Path.Combine(Path.GetDirectoryName(s.RawPath)!,s.Id+".diff-map.json"),Data.Json(UnifiedDiff.Parse(File.ReadAllText(s.TextPath))));
         var sources=capture.Sources.Select(s=>s with{ExportPath=IsDiff(s.OriginalPath)?null:s.ExportPath}).ToList();
         if(input.Mode=="verify")Data.Require(selectedFindings.All(f=>sources.Any(s=>s.Id==f.SourceId)),"verification_snapshot_mismatch",13);
-        var p=new Plan{Id=id,ExecutionMode=store.Namespace,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
+        // A vendor minimum is checked against the planned primary reviewers before anything is captured or sent;
+        // the run checks it again against the reviewers that actually answered.
+        Data.Require(input.MinVendors>=0,"invalid_min_vendors");
+        Data.Require(reviewers.Select(r=>r.ModelDeveloper.Trim().ToLowerInvariant()).Where(d=>d.Length>0&&d!="unknown").Distinct().Count()>=input.MinVendors,"too_few_vendors");
+        var p=new Plan{Id=id,MinVendors=input.MinVendors,ExecutionMode=store.Namespace,ProjectId=input.Project,SourceRoot=root,RepositoryRoot=repo,InputClass=input.InputClass,Instruction=input.Instruction,
             InstructionHash=Data.Hash(input.Instruction),Profile=profile,Reviewers=everyone,Fallbacks=fallbacks.ToDictionary(x=>x.Key,x=>x.Value.Id),Budget=budget,Prices=prices,Fixture=fixture,
             Pins=pins,DirectoryPins=directoryPins,Sources=sources,Exclusions=capture.Exclusions,Chunks=capture.Chunks,Mode=input.Mode,BaseRun=input.BaseRun,FindingIds=input.Findings??[]};
         foreach(var reviewer in reviewers)

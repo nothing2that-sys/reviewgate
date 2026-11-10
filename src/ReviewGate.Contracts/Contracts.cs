@@ -144,7 +144,9 @@ public record FixtureFinding(string Claim, string Detail, string Quote, string S
     string Confidence = "medium", string Suggestion = "", string Impact = "");
 public record FixtureResponse(string Reviewer = "*", string Criterion = "*", string Source = "*",
     int Chunk = -1, string Status = "success", string Disposition = "no_finding", int DelayMs = 0,
-    List<FixtureFinding>? Findings = null, Usage? Usage = null, JsonNode? WireBody = null, int HttpStatus = 200);
+    List<FixtureFinding>? Findings = null, Usage? Usage = null, JsonNode? WireBody = null, int HttpStatus = 200,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? GapReason = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? GapDetail = null);
 public record FixtureBundle(string SchemaVersion, string Id, List<FixtureResponse> Responses);
 public record Grant(string SchemaVersion, string Id, string PlanHash, string ManifestHash,
     DateTimeOffset ExpiresAt, decimal MaxUsd, int MaxRequests, int MaxRetries = 0,
@@ -193,6 +195,10 @@ public sealed record Plan
     public List<Exclusion> Exclusions { get; init; } = [];
     public List<Chunk> Chunks { get; init; } = [];
     public List<RequestPlan> Requests { get; set; } = [];
+    // Answers from at least this many distinct model developers are required for a completed run (0: no rule).
+    // Left out of the JSON when 0, so plans made before the rule keep their hash.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public int MinVendors { get; init; }
 }
 public record Finding(string Id, string RequestId, string ReviewerId, string CriterionId, string SourceId,
     string Path, string? ExportPath, int? Line, int StartByte, int EndByte, long RawStart, long RawEnd,
@@ -203,8 +209,16 @@ public record Finding(string Id, string RequestId, string ReviewerId, string Cri
     int? DiffAfterLine = null, string? DiffOldPath = null, string? DiffNewPath = null);
 public record UnitResult(string UnitId, string RequestId, string ReviewerId, string CriterionId,
     string SourceId, string Stage, string Exposure, string TransportState, string ValidationState,
-    string ReviewDisposition, bool Valid, int CoreBytes, List<Finding> Findings, string? ErrorCode);
-public record ReviewResponse(string Status, string Disposition, List<FixtureFinding> Findings, Usage Usage);
+    string ReviewDisposition, bool Valid, int CoreBytes, List<Finding> Findings, string? ErrorCode,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? GapReason = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? GapDetail = null);
+// GapReason says why a reviewer could not fully review its part: none, files_required (it needs other files, named in
+// GapDetail), focused_review_required (the part is too broad), unreviewable (binary, generated or unreadable), other.
+public record ReviewResponse(string Status, string Disposition, List<FixtureFinding> Findings, Usage Usage, string GapReason = "none", string GapDetail = "");
+// Findings from any reviewers whose verified quotes overlap in the same source. Agreement on a location is a signal for
+// the reader, not proof that the claims are right or the same.
+public record FindingGroup(string Id, string SourceId, string Path, int? Line, int StartByte, int EndByte, List<string> FindingIds,
+    List<string> Reviewers, List<string> Developers, int FoundBy, string MaxSeverity, List<string> Criteria);
 public record RunRow(string Id, string PlanId, string ProjectId, string Status, string Generation,
     string? ErrorCode, DateTimeOffset CreatedAt);
 public record AttemptRow(string Id, string RunId, string RequestId, string GrantId, string Phase,

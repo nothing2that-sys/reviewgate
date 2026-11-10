@@ -35,9 +35,14 @@ public record ReviewerPick(string Provider, string? Model)
     public static ReviewerPick Parse(string text) => text.Split('=', 2) is [var p, var m] ? new(p.Trim(), m.Trim() is { Length: > 0 } x ? x : null) : new(text.Trim(), null);
 }
 public record ReviewRequest(List<ReviewerPick> Reviewers, string Instruction, string SourceRoot, List<string>? Inputs = null, List<string>? References = null,
-    string? RepositoryRoot = null, string ProfileKind = "code", bool UseFallbacks = true, string? Project = null);
+    string? RepositoryRoot = null, string ProfileKind = "code", bool UseFallbacks = true, string? Project = null, int MinVendors = 0);
 public record QuickPreview(string PlanId, string Mode, int Requests, decimal ReservationUsd, List<string> Recipients, List<string> Warnings, int SourceFiles, long SourceBytes, List<string> Exclusions);
-public record FindingView(string Reviewer, string Kind, string Severity, string Location, string Claim, string Detail, string Quote, string Evidence);
+// FoundBy: reviewers whose verified quotes overlap this finding's place (itself included); empty when the quote is unverified.
+public record FindingView(string Reviewer, string Kind, string Severity, string Location, string Claim, string Detail, string Quote, string Evidence, List<string>? FoundBy = null)
+{
+    // Shown in the result grids: how many reviewers flagged the same verified place (empty when only this one did).
+    public string Agreement => FoundBy is { Count: > 1 } f ? $"{f.Count}개 모델 ({string.Join(", ", f)})" : "";
+}
 // Attempts: one entry per call (attempt), each with its model_identity (see ModelIdentity).
 public record QuickResult(string? RunId, string Status, string? ErrorCode, decimal UsageUsd, decimal UnknownHoldUsd, decimal? ProcessingRatio,
     List<FindingView> Findings, List<string> UnitNotes, string? ReportPath, System.Text.Json.Nodes.JsonArray? Attempts = null);
@@ -312,15 +317,15 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         string folderName = Regex.Replace(Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar)), "[^A-Za-z0-9_-]", "-");folderName = folderName[..Math.Min(folderName.Length, 80)];
         string project = request.Project ?? (folderName.Length > 0 ? folderName : "review");
         return Prepare(project, picked.Select(p => p.Primary).ToList(), picked.Select(p => p.Fallback).ToList(), request.ProfileKind, request.Instruction,
-            root, request.RepositoryRoot is null ? null : Path.GetFullPath(request.RepositoryRoot), request.Inputs is { Count: > 0 } i ? i : ["."], request.References ?? []);
+            root, request.RepositoryRoot is null ? null : Path.GetFullPath(request.RepositoryRoot), request.Inputs is { Count: > 0 } i ? i : ["."], request.References ?? [], request.MinVendors);
     }
-    QuickPreview Prepare(string project, List<ModelOption> reviewers, List<ModelOption?> fallbacks, string profileKind, string instruction, string root, string? repositoryRoot, List<string> inputs, List<string> references)
+    QuickPreview Prepare(string project, List<ModelOption> reviewers, List<ModelOption?> fallbacks, string profileKind, string instruction, string root, string? repositoryRoot, List<string> inputs, List<string> references, int minVendors = 0)
     {
         Data.Require(reviewers.Concat(fallbacks.OfType<ModelOption>()).All(m => m.Priced), "price_missing", 12);
         using var store = Open();
         var plan = Planner.Build(store, new(project, root, repositoryRoot, "nonsensitive", instruction, Path.Combine(profilesRoot, profileKind + ".json"),
             reviewers.Select(m => m.File).ToList(), Path.Combine(profilesRoot, "budget-live.json"), MergedPrices().Path, null, inputs, references, reviewers.Count == 2 ? "independent" : "single",
-            FallbackReviewerFiles: fallbacks.Select(m => m?.File).ToList()));
+            FallbackReviewerFiles: fallbacks.Select(m => m?.File).ToList(), MinVendors: minVendors));
         var warnings = new List<string>();
         foreach (var m in reviewers.Concat(fallbacks.OfType<ModelOption>()))
         {
@@ -473,11 +478,17 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     static QuickResult ResultFor(StateStore store, string runId, string? error)
     {
         var run = store.GetRun(runId);var plan = store.GetPlan(run.PlanId);var units = store.Units(runId);var cost = store.Costs(runId);
-        var findings = units.SelectMany(u => u.Findings).Select(f => new FindingView(f.ReviewerId, f.Kind, f.Severity,
+        var all = units.SelectMany(u => u.Findings).ToList();
+        var groups = ReviewEngine.GroupFindings(plan, all).SelectMany(g => g.FindingIds.Select(id => (id, g.Reviewers))).ToDictionary(x => x.id, x => x.Reviewers);
+        var findings = all.Select(f => new FindingView(f.ReviewerId, f.Kind, f.Severity,
             f.Line is null ? f.Path : $"{f.Path}:{f.Line}", f.Claim, f.Detail, f.Quote,
-            !f.QuoteValid ? "인용을 원문에서 찾지 못함 (검증 안 됨)" : !f.LocationValid ? "인용 확인 · 모델이 적은 위치와 다름" : "인용·위치 확인")).ToList();
-        var notes = plan.Requests.Select(q => (q, units.SingleOrDefault(u => u.RequestId == q.Id))).Where(x => x.Item2 is not { Valid: true })
-            .Select(x => $"{x.q.ReviewerId}: {(x.Item2 is null ? "결과 없음" : $"{x.Item2.ValidationState} ({x.Item2.ErrorCode})")}").ToList();
+            !f.QuoteValid ? "인용을 원문에서 찾지 못함 (검증 안 됨)" : !f.LocationValid ? "인용 확인 · 모델이 적은 위치와 다름" : "인용·위치 확인",
+            groups.GetValueOrDefault(f.Id) ?? [])).ToList();
+        string Gap(UnitResult u) => u.GapReason is null ? "" : $" · 검토 못 한 이유: {u.GapReason}{(u.GapDetail is null ? "" : " — " + u.GapDetail)}";
+        var notes = plan.Requests.Select(q => (q, units.SingleOrDefault(u => u.RequestId == q.Id))).Where(x => x.Item2 is not { Valid: true } || x.Item2.GapReason is not null)
+            .Select(x => $"{x.q.ReviewerId}: {(x.Item2 is null ? "결과 없음" : $"{x.Item2.ValidationState} ({x.Item2.ErrorCode ?? x.Item2.ReviewDisposition}){Gap(x.Item2)}")}").ToList();
+        if (plan.MinVendors > 0 && ReviewEngine.AnsweringDevelopers(plan, units) is var dev && dev.Count < plan.MinVendors)
+            notes.Add($"답한 모델 개발사 {dev.Count}곳 ({string.Join(", ", dev)}) — 최소 {plan.MinVendors}곳 필요");
         var report = store.Artifacts(runId).FirstOrDefault(a => a.Path.EndsWith("report.md", StringComparison.Ordinal));
         return new(runId, run.Status, error, cost["usage_calculated_usd"]!.GetValue<decimal>(), cost["unknown_hold_usd"]!.GetValue<decimal>(),
             ReviewEngine.CoverageFor(plan, units).ActualModelProcessingRatio, findings, notes, report is null ? null : Path.Combine(store.Root, report.Path), AttemptsFor(store, plan, runId));

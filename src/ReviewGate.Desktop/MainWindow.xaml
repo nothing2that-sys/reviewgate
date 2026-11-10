@@ -135,6 +135,7 @@
                                 <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="120" />
                                 <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
                                 <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="170" />
+                                <DataGridTextColumn Header="같이 지적" Binding="{Binding Agreement}" Width="150" />
                             </DataGrid.Columns>
                             <DataGrid.RowDetailsTemplate>
                                 <DataTemplate>
@@ -229,6 +230,7 @@
                                 <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="120" />
                                 <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
                                 <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="150" />
+                                <DataGridTextColumn Header="같이 지적" Binding="{Binding Agreement}" Width="150" />
                             </DataGrid.Columns>
                             <DataGrid.RowDetailsTemplate>
                                 <DataTemplate>
@@ -273,6 +275,7 @@
                             <DataGridTextColumn Header="위치" Binding="{Binding Location}" Width="140" />
                             <DataGridTextColumn Header="지적" Binding="{Binding Claim}" Width="*" />
                             <DataGridTextColumn Header="근거 확인" Binding="{Binding Evidence}" Width="170" />
+                            <DataGridTextColumn Header="같이 지적" Binding="{Binding Agreement}" Width="150" />
                         </DataGrid.Columns>
                     </DataGrid>
                 </DockPanel>

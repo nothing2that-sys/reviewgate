@@ -376,7 +376,7 @@ public partial class MainWindow : Window
         if (d["original_checkout_unchanged"] is JsonNode same) text.AppendLine(same.GetValue<bool>() ? "원래 작업 폴더: 그대로" : "원래 작업 폴더: 실행 중 바뀜 — 직접 확인하세요");
         ImplSummary.Text = text.ToString();
         implFindings = (d["review"]?["findings"] as JsonArray ?? []).Select(f => new FindingView(S(f!["reviewer"])!, S(f["kind"]) ?? "", S(f["severity"]) ?? "", S(f["location"]) ?? "",
-            S(f["claim"]) ?? "", S(f["detail"]) ?? "", S(f["quote"]) ?? "", S(f["evidence"]) ?? "")).ToList();
+            S(f["claim"]) ?? "", S(f["detail"]) ?? "", S(f["quote"]) ?? "", S(f["evidence"]) ?? "", (f["found_by"] as JsonArray ?? []).Select(x => x!.GetValue<string>()).ToList())).ToList();
         ImplFindings.ItemsSource = implFindings;
         ImplDiff.Text = S(d["diff_path"]) is string diff && File.Exists(diff) ? File.ReadAllText(diff) : "";
         ImplReportButton.IsEnabled = implReport is not null;SetImplActions(o.Status == "completed" && implBranch is not null);
@@ -467,6 +467,7 @@ public partial class MainWindow : Window
     {
         "credential_missing" => "사용 중인 API 키가 없거나 CLI가 설치되어 있지 않습니다. API 키 탭을 확인하세요",
         "cli_not_found" => "CLI 실행 파일을 찾지 못했습니다",
+        "too_few_vendors" => "서로 다른 회사의 모델이 정해진 수만큼 답하지 않았습니다",
         "no_agreed_prices" => "두 CLI가 일치한 가격이 하나도 없어 가격표를 만들 수 없습니다",
         "unauthorized" => "제공자가 API 키를 거부했습니다",
         "price_missing" => "선택한 모델의 가격 정보가 없습니다. 모델 탭에서 가격을 입력하거나 무료로 표시하세요",

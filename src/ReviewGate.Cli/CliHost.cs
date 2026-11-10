@@ -11,7 +11,7 @@ using ReviewGate.Transport.Http;
 namespace ReviewGate.Cli;
 public static class CliHost
 {
-    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer","allow-root","expires-days","repo","base","branch","worker","check","max-minutes","allow-repo"];
+    static readonly HashSet<string> ValueKeys=["state-root","project","config","source-root","repository-root","input","reference","input-class","profile","mode","base-run","finding","reviewer","budget-policy","prices","execution-mode","fixture","plan","grant-file","run","format","resolve-unknown","prompt-file","output","provider","max-usd","max-requests","max-retries","expires-minutes","name","key-id","fallback-reviewer","allow-root","expires-days","repo","base","branch","worker","check","max-minutes","allow-repo","min-vendors"];
     static readonly HashSet<string> Flags=["allow-partial","recover-only","prompt-stdin","no-fallback","no-review"];
     static readonly HashSet<string> Repeated=["input","reference","reviewer","finding","fallback-reviewer","allow-root","check","allow-repo","worker"];
     public sealed class Options
@@ -36,7 +36,7 @@ public static class CliHost
             if(!o.Items.TryAdd(key,[value])){Data.Require(Repeated.Contains(key),"duplicate_option");o.Items[key].Add(value);}
         }
         // Headless commands take only their own options (no config file, plan, grant, fixture or price overrides).
-        if(o.Command=="review")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "source-root" or "input" or "reference" or "repository-root" or "reviewer" or "no-fallback" or "profile" or "project" or "prompt-file" or "prompt-stdin" or "output")),"invalid_review_options");
+        if(o.Command=="review")Data.Require(!o.Items.Keys.Any(k=>k is not ("state-root" or "source-root" or "input" or "reference" or "repository-root" or "reviewer" or "no-fallback" or "profile" or "project" or "prompt-file" or "prompt-stdin" or "output" or "min-vendors")),"invalid_review_options");
         if(o.Command=="policy")Data.Require(o.Instruction switch
             {
                 "set"=>!o.Items.Keys.Any(k=>k is not ("state-root" or "allow-root" or "reviewer" or "max-usd" or "max-requests" or "expires-days" or "output")),
