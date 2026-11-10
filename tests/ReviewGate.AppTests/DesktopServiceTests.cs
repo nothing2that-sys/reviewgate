@@ -85,7 +85,9 @@ public sealed class DesktopServiceTests
     [Fact] public void ShippedModelsShowPricesAndGoogleFreeTierSetting()
     {
         using var e = new TestEnvironment();var app = Service(e, new());
-        var models = app.Models();Assert.Equal(11, models.Count);Assert.All(models, m => Assert.False(m.Custom));
+        var models = app.Models();Assert.Equal(12, models.Count);Assert.All(models, m => Assert.False(m.Custom));
+        // EXAONE has no price page: its announced (free) price is added to whichever snapshot is in use.
+        var exaone = models.Single(m => m.Id == "exaone-k-exaone-v2.5");Assert.True(exaone.Priced && exaone.Free);Assert.Equal("exaone-k-exaone-v2.5", app.LoadSettings().DefaultModels["exaone"]);
         Assert.True(models.Single(m => m.Id == "google-gemini-3.5-flash").Free);Assert.Equal(0.10m, models.Single(m => m.Id == "openai-gpt-6-luna").InputPerMillion);
         Assert.Equal("google-gemini-3.5-flash", app.LoadSettings().DefaultModels["google"]);
         app.SaveSettings(app.LoadSettings() with { GoogleFreeTier = false });

@@ -81,7 +81,7 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     // ---- Settings and models.
     public DesktopSettings LoadSettings()
     {
-        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash", ["claude-cli"] = "claude-cli", ["codex-cli"] = "codex-cli", ["agy-cli"] = "agy-cli" },
+        var defaults = new DesktopSettings(Data.Version, true, new() { ["openai"] = "openai-gpt-6-luna", ["together"] = "together-glm-5.3-flash", ["google"] = "google-gemini-3.5-flash", ["exaone"] = "exaone-k-exaone-v2.5", ["claude-cli"] = "claude-cli", ["codex-cli"] = "codex-cli", ["agy-cli"] = "agy-cli" },
             new() { ["google"] = "google-gemini-3.5-flash-lite" });
         if (!File.Exists(SettingsFile)) return defaults;
         var saved = Data.Read<DesktopSettings>(SettingsFile);
@@ -208,6 +208,16 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
     public (PriceSnapshot Snapshot, string Path) MergedPrices()
     {
         var snapshot = ShippedPrices(Path.Combine(profilesRoot, "prices"), LoadSettings().GoogleFreeTier, Now, ApprovedPrices);
+        // Rows for models whose provider only announces a price (no price page): added when the snapshot lacks them.
+        string announcedFile = Path.Combine(profilesRoot, "prices", "announced.json");
+        var announced = (File.Exists(announcedFile) ? Data.Read<List<PriceRow>>(announcedFile) : [])
+            .Where(a => snapshot.Prices.All(p => p.CanonicalModelKey != a.CanonicalModelKey)).ToList();
+        if (announced.Count > 0)
+            snapshot = snapshot with
+            {
+                Id = snapshot.Id + "+announced", Source = snapshot.Source + " ; provider-announced rows: " + string.Join(", ", announced.Select(r => r.CanonicalModelKey)),
+                DocumentSha256 = Data.Hash(snapshot.DocumentSha256 + Data.Json(announced)), Prices = [.. snapshot.Prices, .. announced]
+            };
         var custom = File.Exists(CustomPricesFile) ? Data.Read<List<PriceRow>>(CustomPricesFile) : [];
         if (custom.Count > 0)
             snapshot = snapshot with
@@ -314,8 +324,9 @@ public sealed class DesktopService(string stateRoot, string profilesRoot, ICrede
         var warnings = new List<string>();
         foreach (var m in reviewers.Concat(fallbacks.OfType<ModelOption>()))
         {
-            if (m.Free) warnings.Add($"{m.Provider} {m.ModelId}: 무료 티어 — 제공자가 보낸 내용을 제품 개선에 쓰고 사람이 검토할 수 있습니다. 비공개·회사 자료는 보내지 마세요.");
+            if (m.Free && m.Provider != "exaone") warnings.Add($"{m.Provider} {m.ModelId}: 무료 티어 — 제공자가 보낸 내용을 제품 개선에 쓰고 사람이 검토할 수 있습니다. 비공개·회사 자료는 보내지 마세요.");
             if (m.Provider == "together") warnings.Add("Together: store 옵션을 무시합니다. 보관 여부는 Together 계정 설정을 따릅니다.");
+            if (m.Provider == "exaone") warnings.Add("EXAONE: 이용약관상 보낸 내용과 결과를 LG AI연구원이 모델 학습에 쓸 수 있습니다(계정에서 거부 가능, 거부 전 반영분은 삭제 불가). 현재 무료로 제공되어 비용을 0으로 기록하며, 유료로 바뀌면 가격을 갱신해야 합니다.");
             if (m.Custom) warnings.Add($"{m.ModelId}: 사용자가 추가한 모델이며 가격은 사용자가 입력한 값입니다.");
             if (ProviderCatalog.Get(m.Provider).IsCli)
                 warnings.Add($"{ProviderCatalog.Get(m.Provider).DisplayName}: 로그인한 구독 계정으로 처리됩니다(학습 사용·보관은 그 계정 설정을 따름). 비용은 구독 사용량이며 ReviewGate는 token 수만 기록합니다. 샌드박스 없이 검수 폴더에서 실행되며 주변 파일을 읽을 수 있습니다.");

@@ -25,6 +25,8 @@ public static class WireAdapters
             "openai"=>r.ReasoningEffort is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max",
             "google"=>r.ReasoningEffort is "minimal" or "low" or "medium" or "high",
             "together"=>r.ReasoningEffort is "none" or "low" or "medium" or "high",
+            // EXAONE always reasons; reasoning_effort only sets how long (default max).
+            "exaone"=>r.ReasoningEffort is "low" or "high" or "max",
             _=>false
         }),"unsupported_reasoning_effort",14);
     }
@@ -47,7 +49,12 @@ public static class WireAdapters
         Validate(r);Data.Require(!ProviderCatalog.Get(r.HostingProvider).IsCli,"unsupported_capability",14);JsonObject body;
         if(r.HostingProvider=="openai") body=new(){["model"]=r.ModelId,["store"]=false,["instructions"]=system,["input"]=prompt,["max_output_tokens"]=r.MaxOutputTokens,
             ["text"]=new JsonObject{["format"]=new JsonObject{["type"]="json_schema",["name"]=schemaName,["strict"]=true,["schema"]=schema}}};
-        else if(r.HostingProvider=="together") body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=system},new JsonObject{["role"]="user",["content"]=prompt}),
+        // EXAONE documents no structured output; constrained decoding there (live, 2026-11-10) kept the enums but padded the
+        // answer with thousands of blank tokens and empty items. It gets the schema as text and answers freely instead;
+        // the reply is still validated strictly here.
+        else if(r.HostingProvider=="exaone") body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=SchemaInText(system,schema)},new JsonObject{["role"]="user",["content"]=prompt}),
+            ["max_tokens"]=r.MaxOutputTokens};
+        else if(ChatCompletions(r.HostingProvider)) body=new(){["model"]=r.ModelId,["messages"]=new JsonArray(new JsonObject{["role"]="system",["content"]=system},new JsonObject{["role"]="user",["content"]=prompt}),
             ["max_tokens"]=r.MaxOutputTokens,["response_format"]=new JsonObject{["type"]="json_schema",["json_schema"]=new JsonObject{["name"]=schemaName,["schema"]=schema}}};
         else body=new(){["model"]=r.ModelId,["store"]=false,["system_instruction"]=system,["input"]=prompt,
             ["generation_config"]=new JsonObject{["max_output_tokens"]=r.MaxOutputTokens},
@@ -56,12 +63,24 @@ public static class WireAdapters
         {
             if(r.HostingProvider=="openai")body["reasoning"]=new JsonObject{["effort"]=effort};
             else if(r.HostingProvider=="google")body["generation_config"]!["thinking_level"]=effort;
+            else if(r.HostingProvider=="exaone")body["reasoning_effort"]=effort;
             // Together: "none" disables reasoning where the model allows it (GLM-5.2); models that cannot disable it
             // (GLM-5.3) take reasoning_effort. Reasoning and answer share max_tokens, so the budget must cover both.
             else if(effort=="none")body["reasoning"]=new JsonObject{["enabled"]=false};
             else body["reasoning_effort"]=effort;
         }
         string json=body.ToJsonString();Data.Require(Data.Utf8.GetByteCount(json)<=r.MaxRequestBytes,"request_context_exceeded",12);return json;
+    }
+    // For a model without structured output: the system text plus the schema the answer must follow.
+    public static string SchemaInText(string system,JsonObject schema)=>system+"\n\nAnswer with exactly one JSON object and nothing else (no code fences, no prose before or after). "+
+        "It must conform to this JSON Schema; every listed property is required, use only the listed enum values, and never leave a required string empty:\n"+schema.ToJsonString();
+    // A free-form JSON answer may still arrive wrapped in a Markdown code fence or surrounded by blank lines.
+    static string Unfence(string text)
+    {
+        string t=text.Trim();
+        if(!t.StartsWith("```",StringComparison.Ordinal))return t;
+        int open=t.IndexOf('\n'),close=t.LastIndexOf("```",StringComparison.Ordinal);
+        return open>0&&close>open?t[(open+1)..close].Trim():t;
     }
     public static JsonObject PayloadSchema()
     {
@@ -75,13 +94,15 @@ public static class WireAdapters
         props["severity"]=new JsonObject{["type"]="string",["enum"]=Enum("critical","high","medium","low","style")};
         props["reported_evidence_grade"]=new JsonObject{["type"]="string",["enum"]=Enum("observed","inferred","unconfirmed")};
         props["category"]=new JsonObject{["type"]="string",["enum"]=Enum("nullderef","bounds","leak","race","logic","apicontract","errorhandling","perf","style","other")};
-        props["claim"]=new JsonObject{["type"]="string",["description"]="One line, no line breaks."};
-        props["quote"]=new JsonObject{["type"]="string",["description"]="Exact verbatim substring copied from the supplied source text; no paraphrase, ellipsis or added whitespace."};
+        props["claim"]=new JsonObject{["type"]="string",["description"]="Non-empty. One line, no line breaks."};
+        props["detail"]=new JsonObject{["type"]="string",["description"]="Non-empty explanation of the problem."};
+        props["confidence"]=new JsonObject{["type"]="string",["description"]="high, medium or low."};
+        props["quote"]=new JsonObject{["type"]="string",["description"]="Non-empty exact verbatim substring copied from the supplied source text; no paraphrase, ellipsis or added whitespace."};
         props["source_id"]=new JsonObject{["type"]="string",["description"]="source_id of the quoted source from the request, or $source for the core source."};
         props["line"]=new JsonObject{["type"]=new JsonArray("integer","null"),["description"]="1-based line of the quote start in the source, or null."};
         props["assumptions"]=new JsonObject{["type"]="array",["items"]=new JsonObject{["type"]="string"},["description"]="Unverified caller, runtime or external assumptions the claim depends on; empty if none."};
         return new(){["type"]="object",["additionalProperties"]=false,["required"]=new JsonArray("status","disposition","findings"),["properties"]=new JsonObject{
-            ["status"]=new JsonObject{["type"]="string",["enum"]=Enum("success","refused","truncated","error")},
+            ["status"]=new JsonObject{["type"]="string",["enum"]=Enum("success","refused","truncated","error"),["description"]="success when you completed the review, with or without findings; error only when you could not review the source."},
             ["disposition"]=new JsonObject{["type"]="string",["enum"]=Enum("finding","no_finding","cannot_assess","not_reported"),["description"]="finding only when findings is non-empty."},["findings"]=new JsonObject{["type"]="array",["items"]=new JsonObject{["type"]="object",["properties"]=props,["required"]=new JsonArray(props.Select(x=>(JsonNode?)JsonValue.Create(x.Key)).ToArray()),["additionalProperties"]=false}}}};
     }
     public static string WrapFixture(ReviewerProfile r,FixtureResponse f)
@@ -95,7 +116,7 @@ public static class WireAdapters
             ["usage"]=usage.Known?new JsonObject{["input_tokens"]=usage.InputTokens,["cached_input_tokens"]=usage.CachedInputTokens,["output_tokens"]=usage.OutputTokens,["thinking_tokens"]=usage.ReasoningTokens}:null};
         else if(r.HostingProvider=="openai") result=new(){["status"]=f.Status=="truncated"?"incomplete":"completed",["output"]=new JsonArray(new JsonObject{["type"]="message",["content"]=new JsonArray(new JsonObject{["type"]=f.Status=="refused"?"refusal":"output_text",["text"]=payload})}),
             ["usage"]=usage.Known?new JsonObject{["input_tokens"]=usage.InputTokens,["output_tokens"]=usage.OutputTokens,["input_tokens_details"]=new JsonObject{["cached_tokens"]=usage.CachedInputTokens},["output_tokens_details"]=new JsonObject{["reasoning_tokens"]=usage.ReasoningTokens}}:null};
-        else if(r.HostingProvider=="together")result=new(){["choices"]=new JsonArray(new JsonObject{["finish_reason"]=f.Status=="truncated"?"length":f.Status=="refused"?"content_filter":"stop",["message"]=new JsonObject{["content"]=payload}}),
+        else if(ChatCompletions(r.HostingProvider))result=new(){["choices"]=new JsonArray(new JsonObject{["finish_reason"]=f.Status=="truncated"?"length":f.Status=="refused"?"content_filter":"stop",["message"]=new JsonObject{["content"]=payload}}),
             ["usage"]=usage.Known?new JsonObject{["prompt_tokens"]=usage.InputTokens,["completion_tokens"]=usage.OutputTokens,["prompt_tokens_details"]=new JsonObject{["cached_tokens"]=usage.CachedInputTokens},["completion_tokens_details"]=new JsonObject{["reasoning_tokens"]=usage.ReasoningTokens}}:null};
         else result=new(){["status"]=f.Status=="truncated"?"incomplete":"completed",["steps"]=new JsonArray(new JsonObject{["type"]="model_output",["content"]=new JsonArray(new JsonObject{["type"]="text",["text"]=payload})}),
             ["usage"]=usage.Known?new JsonObject{["total_input_tokens"]=usage.InputTokens,["total_output_tokens"]=usage.OutputTokens,["total_thought_tokens"]=usage.ReasoningTokens,["total_cached_tokens"]=usage.CachedInputTokens,["total_tokens"]=usage.InputTokens+usage.OutputTokens+usage.ReasoningTokens}:null};
@@ -156,7 +177,7 @@ public static class WireAdapters
                 {if(c?["type"]?.GetValue<string>()=="refusal"&&status=="success")status="refused";else if(c?["type"]?.GetValue<string>()=="output_text")text+=c["text"]?.GetValue<string>();}
             }
         }
-        else if(provider=="together")
+        else if(ChatCompletions(provider))
         {
             var choice=root["choices"]?[0]??throw new ReviewError(21,"invalid_provider_shape");
             var finish=choice["finish_reason"]?.GetValue<string>();
@@ -164,6 +185,7 @@ public static class WireAdapters
             status=finish is "stop" or "eos"?"success":finish=="content_filter"?"refused":finish=="length"?"truncated":"error";
             Data.Require(choice["message"]?["tool_calls"] is null,"unexpected_tool_call",21);
             text=choice["message"]?["content"]?.GetValue<string>()??"";
+            if(provider=="exaone")text=Unfence(text);
         }
         else
         {
@@ -201,12 +223,13 @@ public static class WireAdapters
             Data.Require(cliIn>=0&&cliOut>=0&&cliCache>=0&&cliCache<=cliIn&&cliThink>=0,"invalid_usage",21);
             return new(cliIn,cliOut,cliCache,cliThink,u["input_tokens"] is not null&&u["output_tokens"] is not null);
         }
-        string i=provider=="openai"?"input_tokens":provider=="together"?"prompt_tokens":"total_input_tokens";
-        string o=provider=="openai"?"output_tokens":provider=="together"?"completion_tokens":"total_output_tokens";
+        string i=provider=="openai"?"input_tokens":ChatCompletions(provider)?"prompt_tokens":"total_input_tokens";
+        string o=provider=="openai"?"output_tokens":ChatCompletions(provider)?"completion_tokens":"total_output_tokens";
         bool known=u[i] is not null&&u[o] is not null;long input=Value(u[i]),output=Value(u[o]),cache=0,reason=0;
         if(provider!="google")
         {cache=Value(u[provider=="openai"?"input_tokens_details":"prompt_tokens_details"]?["cached_tokens"]??u["cached_tokens"]);
-         reason=Value(u[provider=="openai"?"output_tokens_details":"completion_tokens_details"]?["reasoning_tokens"]);}
+         // EXAONE reports reasoning_tokens at the top of usage (included in completion_tokens).
+         reason=Value(u[provider=="openai"?"output_tokens_details":"completion_tokens_details"]?["reasoning_tokens"]??(provider=="exaone"?u["reasoning_tokens"]:null));}
         else
         {
             // Google total = input + output + thought + tool use. Thought is billed separately (reasoning);
@@ -226,6 +249,8 @@ public static class WireAdapters
             +u.OutputTokens*p.OutputPerMillion+(p.OutputIncludesReasoning?0:u.ReasoningTokens*p.ReasoningPerMillion))/1_000_000m;
     }
     public const string InvalidPayload="invalid_payload";
+    // Providers that speak OpenAI-style chat completions (messages in, choices[0].message out).
+    public static bool ChatCompletions(string provider)=>provider is "together" or "exaone";
     // Assumed per-request framing tokens beyond the serialized body (synthetic assumption, not a provider guarantee).
     public const int FramingTokenAllowance=256;
     // A declared token bound alone is not proof: with a byte-level tokenizer, input tokens cannot exceed
@@ -246,6 +271,12 @@ public static class WireAdapters
             if(root?["error"]?["message"] is JsonValue m&&m.GetValueKind()==JsonValueKind.String)
             {
                 string message=System.Text.RegularExpressions.Regex.Replace(m.GetValue<string>(),"[A-Za-z0-9_+/=-]{20,}","[masked]");
+                error["message"]=message.Length>300?message[..300]:message;
+            }
+            if(root?["result_code"] is JsonValue rc&&rc.ToJsonString().Trim('"') is var code&&System.Text.RegularExpressions.Regex.IsMatch(code,"^[A-Za-z0-9_.:-]{1,32}$"))error["code"]=code;
+            if(root?["description"] is JsonValue d&&d.GetValueKind()==JsonValueKind.String&&!error.ContainsKey("message"))
+            {
+                string message=System.Text.RegularExpressions.Regex.Replace(d.GetValue<string>(),"[A-Za-z0-9_+/=-]{20,}","[masked]");
                 error["message"]=message.Length>300?message[..300]:message;
             }
             return new JsonObject{["usage"]=root?["usage"]?.DeepClone(),["error"]=error,["redacted"]=true}.ToJsonString();

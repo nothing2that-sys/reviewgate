@@ -31,7 +31,7 @@ public static class ModelIdentity
                 string? system = body?["system"]?.GetValue<string>(), prompt = body?["prompt"]?.GetValue<string>();
                 return prompt is null ? null : r.HostingProvider == "claude-cli" ? prompt : system + "\n\n" + prompt;
             }
-            if (r.HostingProvider == "together") return (body?["messages"] as JsonArray)?.LastOrDefault()?["content"]?.GetValue<string>();
+            if (WireAdapters.ChatCompletions(r.HostingProvider)) return (body?["messages"] as JsonArray)?.LastOrDefault()?["content"]?.GetValue<string>();
             return body?["input"]?.GetValue<string>();
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException) { return null; }

@@ -69,13 +69,13 @@ public sealed class OfflineE2E
     {
         // Network and credential-store code may exist only in Transport.Http; starting processes (the agent CLIs, git, checks) and
         // reading PATH only in Transport.Cli. Nothing reads API keys from the environment, and the only URLs are the
-        // three fixed provider endpoints in the provider catalog.
+        // fixed provider endpoints in the provider catalog.
         string src=Path.Combine(TestEnvironment.Repository,"src");
         string http=Path.Combine(src,"ReviewGate.Transport.Http")+Path.DirectorySeparatorChar,cli=Path.Combine(src,"ReviewGate.Transport.Cli")+Path.DirectorySeparatorChar;
         string[] network=["HttpClient", "WebRequest", "Socket(", "advapi32", "PasswordVault"];
         string[] process=["Process.Start", "ProcessStartInfo", "GetEnvironmentVariable"];
-        string[] everywhere=["OPENAI_API_KEY", "TOGETHER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_API_KEY"];
-        string[] endpoints=["https://api.openai.com/v1/responses","https://api.together.ai/v1/chat/completions","https://generativelanguage.googleapis.com/v1beta/interactions"];
+        string[] everywhere=["OPENAI_API_KEY", "TOGETHER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_API_KEY", "EXAONE_API_KEY"];
+        string[] endpoints=["https://api.openai.com/v1/responses","https://api.together.ai/v1/chat/completions","https://generativelanguage.googleapis.com/v1beta/interactions","https://api.exaone.ai/v1/chat/completions"];
         foreach(var file in Directory.EnumerateFiles(src,"*.cs",SearchOption.AllDirectories).Where(p=>!p.Contains(Path.DirectorySeparatorChar+"obj"+Path.DirectorySeparatorChar)))
         {
             string text=File.ReadAllText(file).Replace("// Pure wire transformations. No HttpClient, socket, SDK, keyring, credential or environment access.","",StringComparison.Ordinal);

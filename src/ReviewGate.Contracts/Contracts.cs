@@ -286,6 +286,8 @@ public static class ProviderCatalog
         new("openai", "OpenAI", "responses", "https://api.openai.com/v1/responses", "Authorization: Bearer"),
         new("together", "Together AI", "chat_completions", "https://api.together.ai/v1/chat/completions", "Authorization: Bearer"),
         new("google", "Google AI", "interactions", "https://generativelanguage.googleapis.com/v1beta/interactions", "x-goog-api-key"),
+        // LG AI Research EXAONE API: OpenAI-style chat completions (docs.exaone.ai, 2026-11-09 launch).
+        new("exaone", "LG EXAONE", "chat_completions", "https://api.exaone.ai/v1/chat/completions", "Authorization: Bearer"),
         new("claude-cli", "Claude Code CLI", "claude_cli", "claude.exe", "login", "cli"),
         new("codex-cli", "Codex CLI", "codex_cli", "codex.exe", "login", "cli"),
         new("agy-cli", "Antigravity CLI", "agy_cli", "agy.exe", "login", "cli"),

@@ -1,0 +1,12 @@
+[
+  {
+    "canonical_model_key": "lgai/k-exaone-v2.5",
+    "input_per_million": 0,
+    "output_per_million": 0,
+    "cached_input_per_million": 0,
+    "output_includes_reasoning": true,
+    "reasoning_per_million": 0,
+    "tier": "free",
+    "region": "global"
+  }
+]

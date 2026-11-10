@@ -217,7 +217,8 @@ public sealed class LiveTransportTests
     [Fact] public void ShippedLiveProfilesPlanWithinTheSmokeBudget()
     {
         string profiles = Path.Combine(TestEnvironment.Repository, "profiles");
-        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(11, reviewers.Length);
+        var reviewers = Directory.GetFiles(Path.Combine(profiles, "reviewers"), "*.json");Assert.Equal(12, reviewers.Length);
+        var announced = Data.Read<List<PriceRow>>(Path.Combine(profiles, "prices", "announced.json"));
         // Every shipped snapshot, inside its own window (December doubles gemini-4-argon).
         foreach (var (day, snapshot) in new[] { (new DateTimeOffset(2026, 11, 10, 0, 0, 0, TimeSpan.Zero), "live-2026-11-04"), (new DateTimeOffset(2026, 12, 10, 0, 0, 0, TimeSpan.Zero), "live-2026-12-01") })
         foreach (var reviewer in reviewers)
@@ -227,10 +228,17 @@ public sealed class LiveTransportTests
             // gemini-3.5-flash has no verified paid price; it is shipped for free-tier use with the free snapshot only.
             bool freeOnly = reviewer.Contains("3.5-flash");
             var prices = Path.Combine(profiles, "prices", snapshot + (freeOnly ? "-google-free.json" : ".json"));
+            // A provider-announced price (EXAONE, free) is added to the snapshot in use, as the app does.
+            bool announcedOnly = announced.Any(a => a.CanonicalModelKey == Data.Read<ReviewerProfile>(reviewer).CanonicalModelKey);
+            if (announcedOnly)
+            {
+                var s = Data.Read<PriceSnapshot>(prices);string merged = Path.Combine(e.Root, "prices-merged.json");
+                Data.CreateFile(merged, Data.Json(s with { Prices = [.. s.Prices, .. announced] }));prices = merged;
+            }
             var plan = Planner.Build(store, new("smoke", e.Source, e.Source, "nonsensitive", "Review supplied source", Path.Combine(profiles, "code.json"), [reviewer], Path.Combine(profiles, "budget-live.json"), prices, null, ["Sample.cs"], []));
             var request = Assert.Single(plan.Requests);
             // Agent CLIs run on the signed-in subscription: no token price, nothing reserved.
-            if (freeOnly || reviewer.Contains("-cli")) { Assert.Equal(0m, request.ReservationUsd); continue; }
+            if (freeOnly || announcedOnly || reviewer.Contains("-cli")) { Assert.Equal(0m, request.ReservationUsd); continue; }
             // The reservation is the declared worst case (full input, output and thinking bounds), not an expected charge.
             // One small file fits the 1 USD run budget on its own (gemini-4-argon at the December price reserves about 0.56);
             // the low-cost models stay under 10 cents.

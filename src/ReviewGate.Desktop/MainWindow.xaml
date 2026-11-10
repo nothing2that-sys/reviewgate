@@ -173,7 +173,7 @@
                             <TextBlock Text="작업자 (명령 실행 불가)" FontWeight="SemiBold" Margin="0,8,0,0" />
                             <ComboBox x:Name="ImplWorker" DisplayMemberPath="Label" Margin="0,4" />
                             <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
-                                       Text="CLI는 저장소를 직접 읽고 고칩니다. API 모델(OpenAI·Together·Google)은 아래 '고칠 파일·폴더'의 내용만 보고 수정안을 답하며, ReviewGate가 그대로 적용합니다." />
+                                       Text="CLI는 저장소를 직접 읽고 고칩니다. API 모델(OpenAI·Together·Google·EXAONE)은 아래 '고칠 파일·폴더'의 내용만 보고 수정안을 답하며, ReviewGate가 그대로 적용합니다." />
                             <TextBlock Text="고칠 파일·폴더 (한 줄에 하나, API 작업자는 필수)" FontWeight="SemiBold" Margin="0,8,0,0" />
                             <DockPanel Margin="0,4">
                                 <StackPanel DockPanel.Dock="Right" Margin="4,0,0,0">

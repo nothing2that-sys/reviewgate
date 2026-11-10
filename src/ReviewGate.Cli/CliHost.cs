@@ -214,7 +214,7 @@ public static class CliHost
         e.WriteLine($"  sources     {p.Sources.Count(s=>s.Role=="target")} target, {p.Sources.Count(s=>s.Role=="reference")} reference, {p.Sources.Sum(s=>(long)s.ByteLength)} bytes from {p.SourceRoot}");
         foreach(var r in p.Reviewers)
         {
-            e.WriteLine($"  reviewer    {r.Id}: {r.HostingProvider} {r.ModelId} -> {ProviderCatalog.Get(r.HostingProvider).Endpoint}  ({(r.HostingProvider=="together"?"store ignored; retention follows your Together account settings":"store=false sent")})");
+            e.WriteLine($"  reviewer    {r.Id}: {r.HostingProvider} {r.ModelId} -> {ProviderCatalog.Get(r.HostingProvider).Endpoint}  ({(r.HostingProvider=="together"?"store ignored; retention follows your Together account settings":r.HostingProvider=="exaone"?"no store option; LG may use inputs and outputs for training unless you opted out":"store=false sent")})");
             if(p.Prices.Prices.SingleOrDefault(x=>x.CanonicalModelKey==r.CanonicalModelKey)?.Tier=="free")
                 e.WriteLine("  WARNING     free tier: the provider may use submitted content to improve its products and humans may review it. Do not send private or company material.");
         }
